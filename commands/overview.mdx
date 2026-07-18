@@ -1,0 +1,184 @@
+---
+title: "thcode Command Grammar Reference"
+sidebarTitle: "Overview"
+description: "The complete frozen command grammar for thcode's interactive terminal. All 14 slash commands, their aliases, approval requirements, and shell-expansion blocking rules."
+---
+
+thcode dispatches every user action through a single frozen command grammar. There are exactly 14 declared slash commands; no new commands can appear at runtime through aliases, completions, or indirect shell behavior. This design means every action is auditable, every completion is deterministic, and no shell metacharacter can ever reach an underlying execution surface.
+
+## The frozen grammar concept
+
+The `COMMAND_GRAMMAR` constant is a sealed, immutable array. Adding a command requires a deliberate, reviewed change to the grammar definition — it cannot happen at a call site, through an alias, or by any runtime mechanism. Every command dispatches only through `CoreApp`; there is no path that bypasses authority, invokes shell behavior, or rebinds the workspace.
+
+<Note>
+  Completion is also frozen. `completeCommand(prefix)` returns only declared commands and their declared aliases — nothing invented at the call site. `Tab` accepts a completion only while the completion menu is open; the menu state is the gate, not the grammar.
+</Note>
+
+### Shell metacharacter blocking
+
+`parseCommand(input)` rejects any input that contains the following characters or patterns before the grammar lookup even runs:
+
+| Pattern | Reason blocked |
+|---|---|
+| `$` | Environment variable interpolation |
+| `` ` `` | Backtick command substitution |
+| `*` | Glob expansion |
+| `?` | Single-char glob |
+| `;` | Command chaining |
+| `\|` | Pipe |
+| `<` | Input redirect |
+| `>` | Output redirect |
+| `&` | Background / combine |
+| `$(` | POSIX command substitution |
+| `sh -c` | Inline shell invocation |
+
+A blocked input returns a `CommandParseResult` with `ok: false`, `cause: 'shell-expansion-not-permitted'`, and exit class `BLOCKED` (exit code `20`). The rejection is sanitized: no shell command is executed and no file is mutated.
+
+---
+
+## Command table
+
+All 14 commands in the frozen grammar:
+
+| Command | Aliases | Description | Requires approval |
+|---|---|---|:---:|
+| `/status` | `/st` | Show canonical status projection | No |
+| `/permissions` | `/perm` | Show the versioned PermissionMatrix | No |
+| `/mode` | — | Switch Work Mode (plan/build) | **Yes** |
+| `/boundaries` | `/boundary` | List, grant, or revoke Boundary Expansions | **Yes** |
+| `/connections` | `/conn` | Show provider/service health + connection identity | No |
+| `/activity` | `/act` | Show grouped activity history | No |
+| `/models` | — | Typhoon inspection-only | No |
+| `/tools` | — | Catalog/registry + diagnostic controls | No |
+| `/check` | — | Repeat non-mutating dependency preflight | No |
+| `/help` | `/?`, `/h` | List the frozen command grammar | No |
+| `/rollback` | `/rb` | Discover and preview eligible rollback checkpoints | No |
+| `/recover` | `/rc` | Recover interrupted checkpoint and mutation operations | No |
+| `/context` | `/ctx` | Inspect bounded Active Model Context | No |
+| `/usage` | — | Inspect cumulative provider usage | No |
+
+<Note>
+  `/mode` and `/boundaries` are the only commands that mutate authority. Both **may require interactive approval**. If they are invoked without a TTY (redirected or headless mode), they fail closed immediately — they do not wait on stdin.
+</Note>
+
+---
+
+## Core parsing functions
+
+### `parseCommand(input)`
+
+Validates a raw string against the frozen grammar. Returns a discriminated union:
+
+```typescript
+type CommandParseResult =
+  | { readonly ok: true; readonly command: CoreCommand; readonly args: readonly string[] }
+  | { readonly ok: false; readonly cause: string; readonly usage: string; readonly exitClass: ExitClass; readonly exitCode: number };
+```
+
+**Parse flow:**
+<Steps>
+  <Step title="Empty check">
+    An empty or all-whitespace input returns `ok: false` with `cause: 'empty command'`.
+  </Step>
+  <Step title="Metacharacter scan">
+    The shell metacharacter regex runs on the trimmed input. Any match returns `ok: false` with `cause: 'shell-expansion-not-permitted'`.
+  </Step>
+  <Step title="Grammar lookup">
+    The leading token (with or without `/`) is matched against `command` and `aliases` fields in `COMMAND_GRAMMAR`. An unrecognized token returns `ok: false` with `cause: 'unknown-command'`.
+  </Step>
+  <Step title="Success">
+    Returns `ok: true` with the canonical `CoreCommand` name and remaining `args`.
+  </Step>
+</Steps>
+
+### `completeCommand(prefix)`
+
+Returns the sorted list of `/command` and `/alias` strings that start with the given prefix. Only declared names are ever returned — no dynamic or invented completions.
+
+```typescript
+function completeCommand(prefix: string): readonly string[]
+```
+
+### `commandRejection(parse)`
+
+Wraps a failed `CommandParseResult` into a `CommandRejection` envelope. The envelope guarantees that `shellExecuted: false` and `fileMutated: false` are always present so callers have an auditable record.
+
+```typescript
+interface CommandRejection {
+  readonly status: 'blocked';
+  readonly cause: string;
+  readonly usage: string;
+  readonly exitClass: ExitClass;
+  readonly exitCode: number;
+  readonly shellExecuted: false;
+  readonly fileMutated: false;
+}
+```
+
+### `noTtyCommandBlocked()`
+
+Commands that require interactive approval (`/mode`, `/boundaries`) call this function when no TTY is available. The result has `status: 'blocked'`, `cause: 'no-tty-interactive-approval-required'`, and `pendingAuthority: false`. No authority is held in suspension.
+
+```typescript
+interface NoTtyCommandResult {
+  readonly status: 'blocked';
+  readonly cause: 'no-tty-interactive-approval-required';
+  readonly next: 'rerun interactively';
+  readonly exitClass: ExitClass;
+  readonly exitCode: number;
+  readonly pendingAuthority: false;
+}
+```
+
+---
+
+## Exit codes
+
+Exit codes are canonical and stable. They are defined in `EXIT_CODES` in `uxState.ts` and apply uniformly across interactive, redirected, linearized, and headless JSON surfaces.
+
+| Exit class | Code | Meaning |
+|---|:---:|---|
+| `SUCCESS` | `0` | Durable terminal success |
+| `FAILED` | `1` | Durable terminal failure |
+| `BLOCKED` | `20` | Blocked — requires user action to resolve |
+| `UNKNOWN_OUTCOME` | `70` | Dispatch committed, no terminal proof |
+| `CANCELLED` | `130` | Cancelled before dispatch commit |
+
+<Note>
+  Nonterminal states (lifecycle facts, evidence qualifiers, measurement quality rows) carry exit class `NONE` and a `null` exit code in JSON output. They are never represented as a terminal outcome.
+</Note>
+
+### UX state dimensions
+
+The exit codes above apply only to terminal rows in the `operation-status` dimension. The full UX state registry spans five dimensions:
+
+<CardGroup cols={2}>
+  <Card title="operation-status" icon="circle-check">
+    Terminal operation outcomes: `idle`, `succeeded`, `failed`, `blocked`, `malformed`, `denied`, `refused`, `cancelled`, `unknown-outcome`, `reconciled`
+  </Card>
+  <Card title="lifecycle-fact" icon="arrows-rotate">
+    Nonterminal progression facts: `proposed`, `authorized`, `prepared`, `dispatch-committed`, `effect-already-committed`, `still-running`, and interruption states
+  </Card>
+  <Card title="evidence-completeness" icon="magnifying-glass">
+    Qualifiers: `complete`, `partial`, `sanitized-with-omissions`, `stale`, `unavailable`, `corrupt`, `not-authoritative`
+  </Card>
+  <Card title="measurement-quality" icon="chart-bar">
+    Measurement qualifiers: `estimated`, `provider-reported`, `locally-measured`, `fallback`, `unknown`, `percentage unavailable`
+  </Card>
+</CardGroup>
+
+<Tip>
+  `COMMAND_ERROR` is a display heading, not a registry row. It is layered over a canonical `blocked` or `malformed` operation status when rendering command errors. The underlying canonical status, exit class, and exit code always come from the registry row, not from the heading.
+</Tip>
+
+---
+
+## Headless and redirected output
+
+All commands produce parity output across interactive (Ink), redirected (text), linearized, and headless JSON surfaces. The `renderCommandOutput` function splits output as follows:
+
+- **stdout** — normal result content
+- **stderr** — warnings, diagnostics, and progress
+- **JSON** — carries `status`, `cause`, `target`, `operationId`, `promptRoundId`, `exitClass`, `exitCode`, and `nextStep`
+
+Color is never the sole carrier of any state distinction. Every state is identified by a canonical English token and an accompanying text label (e.g. `[OK]`, `[FAIL]`, `[BLOCKED]`). Thai labels accompany the English tokens but never replace them.

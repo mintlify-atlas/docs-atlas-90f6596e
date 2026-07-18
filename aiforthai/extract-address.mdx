@@ -1,0 +1,158 @@
+---
+title: "Extract Address: Parse Thai Addresses"
+sidebarTitle: "Extract Address"
+description: "Extract Address parses Thai free-text addresses into structured components via the AI for Thai endpoint. Currently catalogued in thcode — discoverable and inspectable."
+---
+
+Extract Address is the "other"-category specialist service in thcode's AI for Thai catalog. It takes a Thai free-text address string — the kind found in form submissions, chat messages, shipping labels, or scraped web content — and parses it into discrete structured components: house number, street, subdistrict, district, province, and postal code. This is especially valuable in applications that handle delivery logistics, user profile data, or any workflow that must normalize unstructured Thai addresses before storing or routing them.
+
+<Note>
+  Extract Address is **catalogued** in this release. It is discoverable and fully inspectable via `/tools`, but the endpoint mapping, live transport, and contract test are a subsequent integration phase. Invoking the service now returns a stub refusal: `"Catalogued — Not available yet"`.
+</Note>
+
+## Service Identity
+
+| Field           | Value                                              |
+| --------------- | -------------------------------------------------- |
+| Service ID      | `extract-address`                                  |
+| Upstream name   | `Extract Address`                                  |
+| Thai name       | `แยกที่อยู่`                                        |
+| Category        | `other`                                            |
+| Modality        | `text`                                             |
+| Endpoint        | `https://api.aiforthai.in.th/textmedad`            |
+| Support level   | `catalogued`                                       |
+| Contract ver.   | `1.0.0`                                            |
+| Adapter ver.    | `1.0.0`                                            |
+
+## Search Terms
+
+The router matches Extract Address against the following terms. You can use any of them in the `/tools search` command:
+
+```
+address   ที่อยู่   extraction   structured
+```
+
+## Handler: Input Contract
+
+The `ExtractAddressSpecialistHandler` builds a transport request from a **text artifact**. The handler reads the first prepared artifact, preferring the `text` property and falling back to `extractedText` when `text` is absent. The plain text string is then sent as a JSON body.
+
+```json title="Request body sent to the Extract Address endpoint"
+{
+  "text": "123/45 หมู่ 6 ถนนสุขุมวิท แขวงคลองเตย เขตคลองเตย กรุงเทพมหานคร 10110"
+}
+```
+
+The request is dispatched as an authenticated `POST` to `https://api.aiforthai.in.th/textmedad` with:
+
+- `Authorization: Bearer <key>` — the raw API key is resolved in scope only and never appears in Evidence, logs, or the secret-free `headersSummary` (which shows `[redacted]`).
+- `Content-Type: application/json`
+
+If the artifact is absent or the text is empty, the handler throws before a transport call is made.
+
+## Handler: Output Contract
+
+The `ExtractAddressSpecialistHandler` maps the upstream JSON response into structured address component fields plus confidence and source-span metadata. The upstream response is expected to carry an `address` object, a top-level `confidence` number, and a `sourceSpans` array.
+
+### Address Component Fields
+
+Each of the six address components is mapped individually as a `text` `SpecialistFieldValue`. A component is `present: true` only when the upstream `address` object contains a non-null, non-empty string for that key. Components that are absent, `null`, empty, or of the wrong type are `present: false` and listed in `emptyFields`.
+
+<Tabs>
+  <Tab title="houseNumber">
+    ```json
+    { "kind": "text", "value": "123/45", "present": true }
+    ```
+  </Tab>
+  <Tab title="street">
+    ```json
+    { "kind": "text", "value": "สุขุมวิท", "present": true }
+    ```
+  </Tab>
+  <Tab title="subdistrict">
+    ```json
+    { "kind": "text", "value": "คลองเตย", "present": true }
+    ```
+  </Tab>
+  <Tab title="district">
+    ```json
+    { "kind": "text", "value": "คลองเตย", "present": true }
+    ```
+  </Tab>
+  <Tab title="province">
+    ```json
+    { "kind": "text", "value": "กรุงเทพมหานคร", "present": true }
+    ```
+  </Tab>
+  <Tab title="postalCode">
+    ```json
+    { "kind": "text", "value": "10110", "present": true }
+    ```
+  </Tab>
+</Tabs>
+
+### Confidence and Source Spans
+
+| Field         | Kind         | Description                                                                                                                |
+| ------------- | ------------ | -------------------------------------------------------------------------------------------------------------------------- |
+| `confidence`  | `number`     | Top-level confidence score. Present when a finite `number` is returned. Propagated to `SpecialistResult.confidence`.      |
+| `sourceSpans` | `structured` | Array of span objects indicating where in the original text each component was found. Each span must have `field`, `offset`, and `length`. Stored as `{ items: [...] }`. |
+
+The handler never coerces non-string address components to strings and never invents fields absent from the upstream response.
+
+## Fixture
+
+The handler ships with a deterministic, built-in (non-user) fixture for health probes. The canary uses `text/plain` as the media type and sends the following address string:
+
+```
+123/45 หมู่ 6 ถนนสุขุมวิท แขวงคลองเตย เขตคลองเตย กรุงเทพมหานคร 10110
+```
+
+The fixture's expected structured output is:
+
+```typescript
+EXPECTED_HOUSE_NUMBER = '123/45'
+EXPECTED_STREET       = 'สุขุมวิท'
+EXPECTED_SUBDISTRICT  = 'คลองเตย'
+EXPECTED_DISTRICT     = 'คลองเตย'
+EXPECTED_PROVINCE     = 'กรุงเทพมหานคร'
+EXPECTED_POSTAL_CODE  = '10110'
+EXPECTED_CONFIDENCE   = 0.95
+```
+
+Any media type other than `text/plain` is rejected before the probe is dispatched.
+
+## Use Cases
+
+<CardGroup cols={2}>
+  <Card title="Delivery & Logistics" icon="truck">
+    Parse a user-entered shipping address into components your backend can validate, geocode, or route independently.
+  </Card>
+  <Card title="Form Normalization" icon="table-list">
+    Convert a single free-text address field collected from a form into a structured record for a database or CRM.
+  </Card>
+  <Card title="Data Cleaning" icon="broom">
+    Process legacy datasets where Thai addresses were stored as unstructured strings and normalize them in bulk.
+  </Card>
+  <Card title="User Profile Data" icon="address-card">
+    Validate and structure address fields before they are persisted, reducing downstream parsing errors in Thai e-commerce or registration flows.
+  </Card>
+</CardGroup>
+
+## Using `/tools` with Extract Address
+
+```bash title="Inspect the Extract Address catalog entry"
+/tools inspect extract-address
+```
+
+```bash title="Search for address or structured-text services"
+/tools search address
+/tools search ที่อยู่
+```
+
+<Warning>
+  The inspect output will show `invokable: false` with reason `"Catalogued — Not available yet"`. Attempting to invoke Extract Address before integration is complete will produce a pre-transport refusal — no network call is made.
+</Warning>
+
+## Phase 1 Role
+
+Extract Address is part of both the **Verification Quartet** and the **Demo Portfolio**. In Phase 1, it must pass a live contract test and a complete Typhoon-driven coding scenario before it is considered demo-certified. See ADR 0011 for the full Phase 1 roadmap.

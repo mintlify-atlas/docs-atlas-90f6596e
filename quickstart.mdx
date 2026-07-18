@@ -1,47 +1,198 @@
 ---
-title: "Quickstart"
-description: "Begin with a guide on the fastest path to a successful outcome"
+title: "Get Started with thcode in Minutes"
+sidebarTitle: "Quickstart"
+description: "Build thcode, configure your Typhoon key, and complete your first Thai coding task. From prerequisites to first agent response in five steps."
 ---
 
-Describe how someone begins using your product. What is the first thing they need to do? Are there any prerequisites?
-
-A quickstart should take someone from zero to using your product. They'll get a quick win and a sense of what they can accomplish.
-
-## Prerequisites
-
-Before you begin, you must have:
-
-- Requirement one (for example, Node.js 18+, a free account, an API key)
-- Requirement two (for example, a compatible device, a compatible browser, a compatible operating system)
-
-## Get started
+This guide takes you from a fresh clone to your first Thai coding request. By the end you will have built the CLI, passed the startup preflight gate, configured your Typhoon credential, and sent a task to the agent. Each step below maps to a concrete action you can verify in your terminal.
 
 <Steps>
-  <Step title="Install">
-    Describe how to install your product or sign up.
 
-    ```bash
-    npm install your-package
-    ```
-  </Step>
-  <Step title="Configure">
-    Describe any setup or configuration needed before first use.
+  <Step title="Check prerequisites">
+    Before building, confirm both prerequisites are in place. Open a **PowerShell 7** (`pwsh.exe`) session in Windows Terminal and run:
 
-    ```bash
-    your-cli init
+    ```powershell
+    node --version
+    pwsh --version
     ```
-  </Step>
-  <Step title="Run it">
-    Show the first thing a user does to see it working.
 
-    ```bash
-    your-cli start
+    Expected output (versions may be newer):
+
+    ```text
+    v24.0.0
+    PowerShell 7.6.0
     ```
+
+    You need **Node.js 22 or newer** and **PowerShell 7.4 or newer** (`pwsh.exe`). If either check fails, install the missing prerequisite before continuing:
+
+    - **Node.js**: download from [nodejs.org](https://nodejs.org/) — Node.js 24 LTS is the recommended baseline.
+    - **PowerShell 7**: install via WinGet with `winget install Microsoft.PowerShell`.
+
+    <Warning>
+      Do not use PowerShell 5.1, Git Bash, or WSL. The preflight gate explicitly blocks those environments and will exit with cause `unsupported-shell` before the interactive UI ever loads.
+    </Warning>
   </Step>
+
+  <Step title="Build the CLI">
+    Follow the [Installation guide](/installation) to build from source. In brief:
+
+    ```powershell
+    cd path\to\thcode\cli
+    npm install
+    npm run build
+    npm test
+    ```
+
+    When `npm test` passes, the compiled entry point is at `dist/index.js` and the build is ready.
+
+    <Tip>
+      All tests run offline — no credentials are needed at this stage. A passing test run confirms that the compiled output is correct before you launch the interactive UI.
+    </Tip>
+  </Step>
+
+  <Step title="Run thcode and pass the preflight gate">
+    Start the interactive UI from **inside the repository or project directory** you want thcode to work on:
+
+    ```powershell
+    node dist/index.js
+    ```
+
+    Before Ink or React loads, a **startup preflight gate** runs synchronously. It executes five probes in order and exits with a typed result if any hard blocker is found:
+
+    <Accordion title="What the preflight gate checks">
+      The gate runs the following probes in sequence. The first hard failure short-circuits the rest.
+
+      | # | Probe | Hard blocker? |
+      |---|---|---|
+      | 1 | **Platform** — must be `win32` for the current prototype | Yes |
+      | 2 | **Shell** — `pwsh.exe` must be present and supported | Yes |
+      | 3 | **Node version** — must be `>=22` | Yes |
+      | 4 | **Output mode** — must be an interactive TTY (not redirected/headless) | Yes |
+      | 5 | **Local store posture** — SQLite state directory availability | Best-effort |
+      | 6 | **Credential store posture** — OS credential store reachability | Best-effort |
+
+      If all probes pass and the output mode is `interactive`, the gate emits a one-line safe summary and falls through to `main()`:
+
+      ```text
+      thcode: Supported: win32 / powershell.exe / v24.0.0
+      ```
+
+      If a hard blocker fires, the gate emits a typed diagnostic to `stderr` and exits **before importing Ink**. For example, running under Node 20 produces:
+
+      ```text
+      thcode: Blocked: unsupported-node-version
+      cause: unsupported-node-version
+      recovery: Install Node.js 22 or newer (Node.js 24 LTS is the clean-machine baseline).
+      platform=win32 shell=powershell.exe node=v20.0.0 mode=interactive
+      ```
+
+      Exit codes are deterministic: `0` (SUCCESS), `20` (BLOCKED), `30` (probe FAILED).
+    </Accordion>
+
+    A successful preflight leaves you at the interactive UI. You will see the status bar, an empty transcript area, and the prompt composer at the bottom of the screen.
+  </Step>
+
+  <Step title="Configure your Typhoon credential">
+    Typhoon is the primary reasoning provider. On first run (or whenever no key is stored), thcode will begin credential onboarding automatically.
+
+    The onboarding flow:
+
+    1. **Prompts for your Typhoon API key** — input is masked; the key is never written to disk as plaintext.
+    2. **Stores the key in the Windows OS credential store** — the DPAPI-backed local storage means the key is tied to your Windows user account and not accessible to other users on the machine.
+    3. **Runs a health check** — thcode contacts the Typhoon endpoint and confirms it is reachable and the key is valid before proceeding.
+
+    <Note>
+      Keep your Typhoon key out of source control. thcode is designed to obtain keys through its credential-store interface rather than from configuration files, environment variables written to `.env`, logs, or session data.
+    </Note>
+
+    Once the health check passes, the status bar will show the provider as active. You can re-inspect credential and provider state at any time with `/status`.
+  </Step>
+
+  <Step title="Send your first task">
+    You are now in the interactive UI. New sessions open in **Build mode** with the **Manual** permission profile — the most conservative setting, where every mutating action requires your approval.
+
+    Type a Thai or English coding request in the prompt composer and press `Enter` to submit:
+
+    ```text
+    เขียนฟังก์ชัน Python ที่รับรายการตัวเลขและคืนค่าผลรวม
+    ```
+
+    Or in English:
+
+    ```text
+    Write a Python function that takes a list of numbers and returns their sum.
+    ```
+
+    thcode will send the request to Typhoon, stream the reasoning back into the transcript, and — if it proposes any file changes — ask for your approval before applying them (in Manual mode).
+
+    ### Switching work modes
+
+    | Action | Effect |
+    |---|---|
+    | `Shift+Tab` | Cycles between Plan and Build |
+    | `/plan` | Switches to read-only Plan mode |
+    | `/build` | Switches back to mutating Build mode |
+
+    Switch to Plan mode if you want thcode to inspect and describe without making any changes:
+
+    ```text
+    /plan
+    ```
+
+    ### Useful commands
+
+    <Accordion title="Full interactive command reference">
+      | Command | Purpose |
+      |---|---|
+      | `/help` | List the supported command grammar |
+      | `/status` | Show current mode, provider, health, and context state |
+      | `/plan` | Switch to read-only Plan work mode |
+      | `/build` | Switch to mutating Build work mode |
+      | `/permissions` | Inspect the active permission matrix |
+      | `/models` | Inspect the selected model configuration |
+      | `/tools` | Inspect catalog and diagnostic controls |
+      | `/context` | Inspect active model context |
+      | `/usage` | Show cumulative provider usage |
+      | `/rollback` | Inspect rollback checkpoints |
+      | `/recover` | Inspect interrupted operations |
+
+      Commands are parsed through a fixed grammar. Shell expansion, command substitution, and arbitrary executable dispatch are intentionally refused.
+    </Accordion>
+
+    **Check session status:**
+
+    ```text
+    /status
+    ```
+
+    The status output includes the active work mode, provider name and health, permission profile, and context state.
+
+    **Get help with the command grammar:**
+
+    ```text
+    /help
+    ```
+
+    **Quit the session:**
+
+    Press `Ctrl+C` to exit cleanly.
+  </Step>
+
 </Steps>
 
-<Tip>
-  Give people a way to get help. This could be a link to a support page, a chat with a customer support agent, or a forum for your product.
+## What to Explore Next
 
-  Example: Need help? Reach out to us at [support@yourcompany.com](mailto:support@yourcompany.com).
-</Tip>
+<CardGroup cols={2}>
+  <Card title="Work Modes" icon="toggle-left" href="/concepts/work-modes">
+    Understand the full difference between Plan and Build mode, and when each is the right choice.
+  </Card>
+  <Card title="Permission Profiles" icon="shield" href="/concepts/permission-profiles">
+    Move beyond Manual to Assisted or Full Access once you are comfortable with how thcode handles approvals.
+  </Card>
+  <Card title="AI for Thai Overview" icon="sparkles" href="/aiforthai/overview">
+    Discover the catalogued Thai specialist services available for OCR, speech-to-text, and more.
+  </Card>
+  <Card title="Introduction" icon="book-open" href="/introduction">
+    Go back to the full architecture overview: agent loop, provider registry, and project layout.
+  </Card>
+</CardGroup>

@@ -1,0 +1,331 @@
+---
+title: "Transfer Consent for AI for Thai Services"
+sidebarTitle: "Consent & Transfer"
+description: "Sending data to AI for Thai specialist services requires explicit per-operation transfer consent. thcode blocks service calls until consent, credential health, and authority are all satisfied."
+---
+
+Every time thcode routes an artifact to an AI for Thai specialist service, local read permission is not enough. The payload is leaving the workspace and traveling to an external endpoint, so a separate, explicit transfer consent decision is required for each exact operation — independent of any Full Access flag, Work Mode profile, or prior session approval. This page explains how the consent pipeline is structured, what information it captures, how it validates the credential-to-host binding, and precisely what causes a service call to be blocked.
+
+## Why Transfer Consent Is Required
+
+<CardGroup cols={2}>
+  <Card title="Data leaves the local workspace" icon="arrow-up-right-from-square">
+    Specialist calls send artifact bytes to a remote HTTPS endpoint. That transfer is a distinct trust boundary from local file reads, which is why it requires its own consent decision.
+  </Card>
+  <Card title="Consent is per-exact-operation" icon="lock">
+    Any change in the artifact content, payload classification, recipient endpoint, or manifest fields makes a prior consent stale. The service call fails closed and fresh consent is required.
+  </Card>
+</CardGroup>
+
+Three prerequisites must all be satisfied before any specialist service call can proceed:
+
+1. **A separately configured AI for Thai credential** — the `aiforthai` credential group, bound to its verified host. A Typhoon key cannot substitute.
+2. **An available health state** — the specialist's health check must currently report `available` for the exact configuration generation in use. A force-fresh call additionally requires `available` health; a cached-hit path does not.
+3. **Explicit transfer consent** — the user must grant consent to the exact `PreparedPayloadManifest` produced for this operation. No approval from a different operation substitutes.
+
+<Note>
+  AD-17 states that consent is independent per exact transfer. Full Access, local approval, cache reuse, and prior consent never substitute for a fresh exact consent decision.
+</Note>
+
+## The Prepared Payload Manifest
+
+Before consent is requested, `buildSpecialistPreparedPayloadManifest` assembles a `PreparedPayloadManifest` that captures every field that defines the transfer. The manifest is the stable, tamper-evident identity of what is being sent, where it is going, and under what conditions.
+
+```typescript
+// From permissions/transferConsent.ts
+export interface PreparedPayloadManifest {
+  readonly manifestVersion: number;
+  readonly sources: readonly SelectedSource[];       // artifact identity + hashes, never raw bytes
+  readonly classification: PayloadClassification;   // 'public' | 'internal' | 'sensitive' | 'unresolved'
+  readonly purpose: string;                          // routing proposal rationale
+  readonly transformation: TransformationPolicy;    // redaction/extraction policy
+  readonly recipient: Recipient;                    // capabilityId + verifiedEndpoint + method
+  readonly callCount: number;
+  readonly retention: RetentionHandling;            // provider's data-retention contract
+  readonly operationId: string;
+  readonly promptRoundId: string;
+  readonly expiresAt: string | null;
+  readonly manifestDigest: string;                  // SHA-256 of canonical fields
+  readonly payloadByteDigest: string;               // SHA-256 of the exact bytes to transfer
+}
+```
+
+`manifestDigest` is a SHA-256 hash of all manifest fields in canonical JSON order. `payloadByteDigest` is a SHA-256 hash of the framed artifact bytes (each artifact framed as `<contentKind>\n<mediaType>\n<contentHash>\n<byteLen>\n<content>`). Both digests are verified again immediately before any wire transfer — a changed field fails the call closed.
+
+### Payload Classification
+
+The manifest's `classification` field is derived from the artifacts and the capability registry entry:
+
+| Classification | Condition |
+|---|---|
+| `unresolved` | Any artifact has `privacyClassification === 'secret'`. Transfer is **blocked**. |
+| `sensitive` | Registry entry has `requiresConsent: true` or data classes containing `sensitive`, `personal`, or `pii`. |
+| `internal` | Any artifact has `privacyClassification === 'internal'`. |
+| `public` | No sensitive indicators from artifacts or registry entry. |
+
+<Warning>
+  An `unresolved` classification blocks the transfer entirely. The consent evaluation returns `cause: 'classification-unresolved'` and the service is never contacted.
+</Warning>
+
+### Retention Handling
+
+`resolveRetentionHandling` maps the registry entry's `retentionClassification.policy` string to one of four `RetentionHandling` values. When in doubt the function returns `unknown`, which causes the consent gate to fail closed:
+
+```typescript
+// From specialists/consent/retention.ts
+export type RetentionHandling =
+  | 'upstream-no-retention-verified'   // policy contains "no-retention", "none", "zero-retention", or "retention:none"
+  | 'deletion-confirmed'               // policy contains "deletion-confirmed" AND providerDeletionSupported === true
+  | 'deletion-not-required'            // policy contains "deletion-not-required" or "not-required"
+  | 'unknown';                         // everything else — fails closed
+```
+
+A `retention === 'unknown'` value blocks consent with `cause: 'retention-unknown'`.
+
+## The Consent Dialog
+
+`buildConsentDialogSummary` constructs a `ConsentDialogSummary` — a secret-free surface presented to the user before any data is sent. It contains everything relevant to an informed decision, and nothing that could leak artifact content.
+
+```typescript
+// From specialists/consent/dialog.ts
+export interface ConsentDialogSummary {
+  readonly recipient: {
+    readonly capabilityId: string;
+    readonly capabilityVersion: string;
+    readonly verifiedEndpoint: string;
+    readonly method: string;
+  };
+  readonly purpose: string;
+  readonly safePayloadSummary: SafePayloadSummary; // source count, size, hashes — NOT content
+  readonly sideEffects: readonly string[];
+  readonly manifestDigest: string;
+  readonly payloadDigest: string;
+  readonly consentReference: ConsentReference;
+  readonly initialFocus: 'consent-review'; // NEVER auto-grant
+}
+```
+
+The `initialFocus` is always `'consent-review'` — the dialog opens focused on reviewing, never on granting. In development and test environments, a runtime assertion verifies that no artifact text has leaked into the summary by scanning for text segments of four characters or more.
+
+### Safe Payload Summary
+
+`SafePayloadSummary` describes the payload without exposing content:
+
+```typescript
+export interface SafePayloadSummary {
+  readonly sourceCount: number;
+  readonly totalSizeBytes: number;
+  readonly sourceIdentities: readonly SafeSourceIdentity[]; // canonical path + mediaType + sizeBytes + hash
+  readonly classification: string;
+  readonly retentionStatus: RetentionHandling;
+  readonly payloadDigest: string;
+  readonly manifestDigest: string;
+}
+```
+
+## Evaluating Transfer Consent
+
+`requestSpecialistTransferConsent` wraps `evaluateTransferConsent` from `permissions/transferConsent.ts`. Evaluation is purely synchronous and returns a typed `ConsentEvaluationResult`:
+
+```typescript
+export type ConsentEvaluationResult =
+  | { readonly ok: true; readonly consent: TransferConsent }
+  | { readonly ok: false; readonly cause: ConsentFailureCause; readonly safeExplanation: string };
+
+export type ConsentFailureCause =
+  | 'classification-unresolved'
+  | 'retention-unknown'
+  | 'destination-unresolved'
+  | 'manifest-digest-mismatch'
+  | 'payload-byte-digest-mismatch'
+  | 'unsafe-payload'
+  | 'expired'
+  | 'activation-changed';
+```
+
+The evaluation runs through a strict gating sequence:
+
+<Steps>
+  <Step title="Classification check">
+    If `manifest.classification === 'unresolved'`, return `cause: 'classification-unresolved'`. No service is contacted.
+  </Step>
+  <Step title="Retention check">
+    If `manifest.retention === 'unknown'`, return `cause: 'retention-unknown'`. A verified provider contract is required.
+  </Step>
+  <Step title="Endpoint check">
+    If `manifest.recipient.verifiedEndpoint` is empty, return `cause: 'destination-unresolved'`.
+  </Step>
+  <Step title="Manifest digest recomputation">
+    The manifest digest is recomputed from scratch and compared against `manifest.manifestDigest`. Any field change returns `cause: 'manifest-digest-mismatch'`.
+  </Step>
+  <Step title="Payload byte digest check">
+    `currentPayloadByteDigest` (computed fresh from the current artifact bytes) must equal `manifest.payloadByteDigest`. Any byte change returns `cause: 'payload-byte-digest-mismatch'`.
+  </Step>
+  <Step title="Safety check">
+    The sanitizer result must be `ok: true`. An unsafe payload (detected credentials, unresolved local paths, unsafe active content) returns `cause: 'unsafe-payload'`.
+  </Step>
+  <Step title="Expiry check">
+    If `manifest.expiresAt` is set and the manifest has expired, return `cause: 'expired'`.
+  </Step>
+  <Step title="Consent granted">
+    All gates pass. A `TransferConsent` is constructed and returned with `ok: true`.
+  </Step>
+</Steps>
+
+## The Transfer Consent Record
+
+A granted consent is a `TransferConsent` — a fully-bound, secret-free record:
+
+```typescript
+// From permissions/transferConsent.ts
+export interface TransferConsent {
+  readonly consentId: string;
+  readonly manifestDigest: string;
+  readonly payloadByteDigest: string;
+  readonly recipientCapabilityId: string;
+  readonly recipientCapabilityVersion: string;
+  readonly verifiedEndpoint: string;
+  readonly purpose: string;
+  readonly callCount: number;
+  readonly expiresAt: string | null;
+  readonly operationId: string;
+  readonly promptRoundId: string;
+  readonly activationId: string;
+  readonly activationRevision: number;
+  readonly authorityRevision: number;
+  readonly policyVersion: number;
+  readonly granted: true;
+  readonly grantedAt: string;
+}
+```
+
+The `TransferConsent` carries no secrets — only digests, identities, versions, and timestamps. It is projected into a `ConsentReference` (a further-reduced, secret-free handle) for use in Evidence records and dialog display:
+
+```typescript
+// From specialists/consent/types.ts
+export interface ConsentReference {
+  readonly consentId: string;
+  readonly manifestDigest: string;
+  readonly payloadByteDigest: string;
+  readonly recipientCapabilityId: string;
+  readonly recipientCapabilityVersion: string;
+  readonly verifiedEndpoint: string;
+  readonly purpose: string;
+  readonly grantedAt: string;
+  readonly expiresAt: string | null;
+}
+```
+
+`toConsentReference` performs this projection — it strips `callCount`, `operationId`, `promptRoundId`, `activationId`, activation/authority revision fields, and `policyVersion`, keeping only the fields appropriate for Evidence and dialog surfaces.
+
+## Revalidation Before Transport
+
+Consent granted at dialog time must be revalidated immediately before the wire transfer via `revalidateSpecialistTransferConsent`. This detects any change between consent grant and the actual transport moment:
+
+```typescript
+// revalidation fails closed on any change in:
+// - activationId
+// - activationRevision or authorityRevision
+// - manifest fields (manifestDigest recomputed)
+// - payloadByteDigest
+```
+
+A changed `activationId` returns `cause: 'activation-changed'`. A changed activation or authority revision also returns `cause: 'activation-changed'`. Any other manifest or payload change returns `cause: 'manifest-digest-mismatch'`. All of these block the transfer.
+
+## Credential Identity and Host Binding
+
+`CredentialIdentity` in `permissions/credentialIdentity.ts` defines the binding between a credential and its one verified service host. An AI for Thai key is bound to AI for Thai endpoints only.
+
+```typescript
+export type CredentialGroupId = 'typhoon' | 'aiforthai' | 'scbx';
+
+export interface CredentialIdentity {
+  readonly credentialGroupId: CredentialGroupId; // 'aiforthai' for AI for Thai services
+  readonly serviceIdentity: string;              // e.g. "aiforthai:t-ocr"
+  readonly verifiedHost: string;                 // the one verified origin the key can reach
+  readonly credentialRevision: string;
+  readonly fingerprint: string;                  // hash of revision + identity + host — never the secret
+}
+```
+
+`checkCredentialBoundary` enforces that no credential is ever routed to a different group's service host:
+
+```typescript
+// From permissions/credentialIdentity.ts
+export function checkCredentialBoundary(
+  request: { credentialGroupId: CredentialGroupId; targetGroupId: CredentialGroupId },
+): CredentialBoundaryResult {
+  if (request.credentialGroupId !== request.targetGroupId) {
+    return {
+      ok: false,
+      cause: 'group-mismatch',
+      safeExplanation: `Credential-boundary violation: ${request.credentialGroupId} credential cannot be presented to a ${request.targetGroupId} service host.`,
+    };
+  }
+  return { ok: true };
+}
+```
+
+A credential-boundary violation is denied **without contacting the destination**. Only sanitized Evidence is produced; no outbound request is made.
+
+### Credential Request Validation
+
+`validateCredentialRequest` enforces three additional transport-time rules:
+
+| Violation | `cause` | Explanation |
+|---|---|---|
+| Cross-origin redirect accepted | `cross-origin-redirect` | Credential is bound to the verified host; redirects are refused |
+| TLS verification bypassed | `tls-bypass` | Downgrade/bypass of TLS verification is refused |
+| Requested host ≠ verified host | `host-mismatch` | The outbound request target must exactly match the registered host |
+| Credential embedded in URL | `credential-in-url` | Credentials must only appear in transport headers |
+
+### Staleness After Credential Rotation
+
+`isCredentialAuthorityStale` returns `true` when a prior approval or consent can no longer be trusted because the credential has been rotated or the health configuration generation has changed:
+
+```typescript
+export function isCredentialAuthorityStale(input: {
+  approvedCredentialRevision: string;
+  currentCredentialRevision: string;
+  approvedHealthGeneration?: string;
+  currentHealthGeneration?: string;
+}): boolean
+```
+
+A stale credential makes any prior consent invalid — fresh evaluation is required.
+
+## What Happens Without Consent
+
+<Accordion title="Classification unresolved (secret artifact)">
+  If any prepared artifact carries `privacyClassification === 'secret'`, the manifest classification is set to `'unresolved'`. The consent evaluation returns `cause: 'classification-unresolved'` with the explanation: _"Payload classification is unresolved; classify before requesting transfer consent."_ No service call is made.
+</Accordion>
+
+<Accordion title="Retention policy unknown">
+  If the capability registry entry's `retentionClassification.policy` does not match any of the known patterns, `resolveRetentionHandling` returns `'unknown'`. Consent evaluation returns `cause: 'retention-unknown'`: _"Recipient retention/deletion handling is unknown; a verified provider contract is required."_
+</Accordion>
+
+<Accordion title="Unsafe payload content">
+  Credentials (Authorization headers, Bearer tokens, API keys), unresolved local paths, and unsafe active content (script tags, `javascript:` URIs, inline event handlers) are detected by the sanitizer. The prepared content must pass sanitizer checks before consent is granted. If unsafe content is detected, `cause: 'unsafe-payload'` blocks the transfer.
+</Accordion>
+
+<Accordion title="Manifest or payload changed">
+  Any field change between manifest build and the consent evaluation, or between consent grant and the pre-transport revalidation, causes `cause: 'manifest-digest-mismatch'` or `cause: 'payload-byte-digest-mismatch'`. Fresh preparation and consent are required.
+</Accordion>
+
+<Accordion title="Credential-boundary violation">
+  Routing an `aiforthai` credential toward a `typhoon` or `scbx` service host (or vice versa) is a credential-boundary violation. The call is denied before any outbound connection, and only sanitized Evidence is produced.
+</Accordion>
+
+## Sensitive Tool Categories
+
+Tools that process identity, biometric, or medical data produce artifacts with `privacyClassification === 'sensitive'` or registry entries with `requiresConsent: true` and sensitive data classes. These produce a `classification: 'sensitive'` manifest, which:
+
+- Is shown to the user with the sensitive classification prominently displayed in the `ConsentDialogSummary`.
+- Still requires the same explicit per-operation consent as any other transfer.
+- Is never silently downgraded to `'public'` or `'internal'`.
+
+`'unresolved'` (from a `'secret'` artifact) is the only classification that blocks transfer outright regardless of user action. All other classifications require affirmative user consent before proceeding.
+
+<Tip>
+  The `ConsentReference` stored in every Evidence record links the cached result back to the exact consent that authorized it. A cache hit reuses the original consent provenance without requiring re-consent. See [Evidence Caching](/aiforthai/evidence-caching) for how cached results preserve this linkage.
+</Tip>

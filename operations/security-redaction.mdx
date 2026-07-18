@@ -1,0 +1,279 @@
+---
+title: "Security and Redaction: Protecting Credentials"
+sidebarTitle: "Security"
+description: "thcode sanitizes all tool output before it reaches the reasoning model. Credential patterns are redacted at a hard enforcement boundary that the model cannot override."
+---
+
+thcode applies multiple layers of credential protection to ensure that secrets never appear in model prompts, transcripts, logs, previews, or Evidence records. The innermost layer is a versioned `Sanitizer` that operates at every persistence and presentation boundary. On top of that, a dedicated `redactSecrets()` function scrubs recognized credential shapes from all tool output before it enters a reasoning turn. These are structural enforcement boundaries built into the execution pipeline — they are not configurable by the model and cannot be bypassed by permission profile choices.
+
+## The Sanitizer
+
+`Sanitizer` in `security/sanitizer.ts` is the shared singleton applied before content enters persistence, display, logging, export, or the model-context boundary. It is versioned (`SANITIZER_VERSION = 1`) and content-class-aware, applying different pattern sets depending on what kind of content is being processed.
+
+### Content Classes
+
+```typescript
+type ContentClass =
+  | 'credential'
+  | 'header'
+  | 'url-query'
+  | 'environment'
+  | 'path'
+  | 'stack-trace'
+  | 'command-output'
+  | 'tool-output'
+  | 'remote-payload'
+  | 'user-content'
+  | 'error-message';
+```
+
+The content class determines which pattern families are applied:
+
+| Content class | Pattern families applied |
+|--------------|--------------------------|
+| `credential` | Credential patterns |
+| `header` | Header patterns + credential patterns |
+| `url-query` | URL query patterns |
+| `environment` | Environment variable patterns |
+| `stack-trace` | Stack trace patterns |
+| `command-output`, `tool-output`, `remote-payload` | Credential + header + environment patterns |
+| `user-content`, `path`, `error-message` | Credential patterns |
+
+### Pattern Families
+
+<Accordion title="Credential patterns">
+  Applied to most content classes. Matches:
+  - `sk-` prefixed API keys (16+ alphanumeric characters): replaced with `[redacted:api-key]`
+  - Bearer tokens in Authorization headers (16+ characters): replaced with `Bearer [redacted:token]`
+  - Generic `api_key`, `secret`, `token`, `password` key-value assignments (8+ character values): replaced with `[redacted]`
+</Accordion>
+
+<Accordion title="Header patterns">
+  Targets HTTP authorization headers:
+  - `Authorization:` header lines: replaced with `Authorization: [redacted]`
+  - `X-Api-Key:` header lines: replaced with `X-Api-Key: [redacted]`
+</Accordion>
+
+<Accordion title="URL query patterns">
+  Targets credential-bearing query parameters:
+  - `?api_key=`, `?token=`, `?secret=`, `?password=`, `?auth=` parameters: replaced with `[redacted]`
+</Accordion>
+
+<Accordion title="Environment variable patterns">
+  Targets credential-bearing environment variable assignments:
+  - Lines matching `KEY=`, `SECRET=`, `TOKEN=`, `PASSWORD=`, `CREDENTIAL=` assignments: value replaced with `[redacted]`
+</Accordion>
+
+### Sanitize Result
+
+```typescript
+type SanitizeResult =
+  | { ok: true;  value: string; omissions: string[] }
+  | { ok: false; cause: string; omissions: string[] };
+```
+
+When content is fully redacted (the entire string becomes empty after sanitization), the result is `{ ok: false, cause: 'content fully redacted' }`. In that case, `sanitizeOrBlock()` returns a caller-supplied safe fallback string rather than the empty result.
+
+The `omissions` array lists every pattern that triggered a redaction. This list is safe to log — it describes what was redacted without revealing any secret value.
+
+## Tool Output Redaction
+
+`redactSecrets()` in `security/redact.ts` is applied to all tool output before it enters a reasoning turn, log, or transcript. This is a targeted, fast-path scrub designed to catch common credential shapes that might appear in command output, file contents, or API responses:
+
+```typescript
+const PATTERNS: Array<{ re: RegExp; label: string }> = [
+  { re: /sk-[A-Za-z0-9]{16,}/g,           label: '[redacted:api-key]' },
+  { re: /Bearer\s+[A-Za-z0-9._-]{16,}/g,  label: 'Bearer [redacted:token]' },
+  { re: /((?:api[_-]?key|secret|token|password)\s*[:=]\s*)["']?[^\s"']{8,}["']?/gi,
+                                            label: '$1[redacted]' },
+];
+
+export function redactSecrets(text: string): string {
+  let out = text;
+  for (const { re, label } of PATTERNS) {
+    out = out.replace(re, label);
+  }
+  return out;
+}
+```
+
+<Note>
+  Provider API keys never flow through `redactSecrets()` in the first place — they live only in the OS credential store and are never included in tool output or command results. `redactSecrets()` is a defense-in-depth gate for credentials that might appear in workspace files or shell output.
+</Note>
+
+## Credential Identity and Service-Host Isolation
+
+Every credential in thcode is bound to exactly one verified service host. `CredentialIdentity` in `permissions/credentialIdentity.ts` makes this binding explicit and enforces it at the boundary.
+
+### CredentialIdentity Structure
+
+```typescript
+interface CredentialIdentity {
+  credentialGroupId: CredentialGroupId; // 'typhoon' | 'aiforthai' | 'scbx'
+  serviceIdentity: string;     // e.g. "typhoon", "aiforthai:t-ocr"
+  verifiedHost: string;        // The exact host the credential may be presented to
+  credentialRevision: string;  // Changes when the key is rotated or replaced
+  fingerprint: string;         // Secret-free hash of identity + host + revision
+}
+```
+
+The `fingerprint` is a truncated SHA-256 hash of `serviceIdentity|verifiedHost|credentialRevision`. The secret value **never** participates in the fingerprint computation.
+
+### Credential Groups
+
+```typescript
+type CredentialGroupId = 'typhoon' | 'aiforthai' | 'scbx';
+```
+
+These three credential groups are mutually isolated trust boundaries. A credential belonging to one group can never be presented to a service host in a different group.
+
+### Credential Boundary Enforcement
+
+`checkCredentialBoundary()` enforces group isolation:
+
+```typescript
+// Attempt to route a 'typhoon' credential to an 'aiforthai' host → denied
+checkCredentialBoundary({
+  credentialGroupId: 'typhoon',
+  targetGroupId: 'aiforthai',
+});
+// → { ok: false, cause: 'group-mismatch', safeExplanation: '...' }
+```
+
+A credential-boundary violation is **denied without contacting the destination**. Only sanitized Evidence is produced — no network request is made, and no credential value appears in the failure explanation.
+
+`validateCredentialRequest()` also enforces per-request host validation:
+
+- **Cross-origin redirects** — rejected; credentials are bound to the verified host, not wherever a redirect leads
+- **TLS bypass or downgrade** — rejected unconditionally
+- **Host mismatch** — the requested host must exactly match `verifiedHost`
+- **Credential-in-URL** — detected separately by `detectUnsafePreparedContent()`
+
+### Stale Authority Detection
+
+When a credential is rotated or a provider's health/configuration generation changes, any prior approval or transfer consent becomes stale:
+
+```typescript
+isCredentialAuthorityStale({
+  approvedCredentialRevision: 'rev-1',
+  currentCredentialRevision:  'rev-2',  // key was rotated
+});
+// → true — prior approval must be re-evaluated
+```
+
+A changed credential cannot silently reuse a prior authorization.
+
+### Connection Info Projection
+
+Raw credentials and authorization headers **never appear** in logs, prompts, context, transcripts, activity feeds, Evidence, accessibility output, clipboard, crash reports, previews, or headless JSON. The `ConnectionInfoProjection` type carries only safe identity information:
+
+```typescript
+interface ConnectionInfoProjection {
+  credentialGroupId: CredentialGroupId;
+  serviceIdentity: string;
+  verifiedHost: string;
+  credentialRevision: string;
+  fingerprint: string;      // Hash of identity + host + revision
+  modelPin: string;         // 'Typhoon version: unverified' until a verified pin exists
+}
+```
+
+`scrubConnectionSecrets()` provides an additional defense-in-depth gate that strips authorization headers, Bearer tokens, API keys, and credential-in-URL patterns from any string before it enters a log or context boundary.
+
+## Transfer Consent
+
+Any operation that sends data outside the workspace requires explicit per-operation consent. `transferConsent.ts` defines the consent contracts that govern remote transfers.
+
+### PreparedPayloadManifest
+
+A prepared payload manifest captures every attribute of a pending transfer without including the raw payload bytes:
+
+```typescript
+interface PreparedPayloadManifest {
+  sources: SelectedSource[];          // Identity and hash, never raw bytes
+  classification: PayloadClassification; // 'public' | 'internal' | 'sensitive' | 'unresolved'
+  purpose: string;
+  transformation: TransformationPolicy; // redactSecrets, extractTextOnly, stripActiveContent
+  recipient: Recipient;               // verifiedEndpoint, capabilityId, method
+  callCount: number;
+  retention: RetentionHandling;       // must not be 'unknown'
+  operationId: string;
+  promptRoundId: string;
+  expiresAt: string | null;
+  manifestDigest: string;             // SHA-256 of all fields above
+  payloadByteDigest: string;          // SHA-256 of the exact payload bytes
+}
+```
+
+`classification: 'unresolved'` or `retention: 'unknown'` **blocks the transfer** — the consent gate fails closed on unresolved fields.
+
+### TransferConsent Binding
+
+A `TransferConsent` is bound to both the canonical manifest digest **and** the exact payload-byte digest, plus the recipient, endpoint, purpose, call count, expiry, operation scope, Prompt Round, activation ID, activation revision, authority revision, and policy version.
+
+```typescript
+interface TransferConsent {
+  consentId: string;
+  manifestDigest: string;
+  payloadByteDigest: string;
+  verifiedEndpoint: string;
+  activationId: string;
+  activationRevision: number;
+  authorityRevision: number;
+  policyVersion: number;
+  granted: true;
+  grantedAt: string;
+  // ... full scope fields
+}
+```
+
+### Revalidation Before Transport
+
+`revalidateTransferConsent()` is called immediately before every transport — a changed classification, destination, retention policy, manifest digest, or payload byte digest makes the prior consent stale and fails the transfer closed:
+
+```typescript
+// Any field change since consent was granted → transfer refused
+if (fresh !== m.manifestDigest) {
+  return { ok: false, cause: 'manifest-digest-mismatch', ... };
+}
+if (currentPayloadByteDigest !== m.payloadByteDigest) {
+  return { ok: false, cause: 'payload-byte-digest-mismatch', ... };
+}
+```
+
+A changed `activationId`, `activationRevision`, or `authorityRevision` also invalidates the consent — runtime authority changes require fresh consent, not re-use of a stale grant.
+
+### Consent Independence
+
+Transfer consent evaluation is **independent** of:
+- Local read permission
+- Work Mode (Autonomous, Interactive, Manual)
+- Permission Profile (Standard, Full Access)
+
+The PEP returns `ask` or `deny` for a transfer regardless of how permissive the current session configuration is.
+
+<Warning>
+  The `sensitiveOverride` flag requires explicit session-scoped consent and cannot be set by the model itself. It is a user-granted authorization that applies only within the current session scope.
+</Warning>
+
+## Unsafe Content Detection
+
+`detectUnsafePreparedContent()` inspects prepared payload text for content that must never be transferred:
+
+```typescript
+function detectUnsafePreparedContent(text: string): {
+  unsafe: boolean;
+  markers: readonly string[];  // Never includes the secret value itself
+}
+```
+
+It checks for:
+- **Credentials or secrets** — runs the Sanitizer's credential patterns; any match is a marker
+- **Unresolved local paths** — absolute paths, relative `./` or `../` references; an unresolved path is never authority to fetch workspace material
+- **Unsafe active content** — `<script`, `javascript:`, and inline event handlers
+
+If any marker is found, the prepared payload is classified as unsafe and the transfer is blocked with a `safe: false` result. The markers list is safe to surface in Evidence — it names what was found without revealing the value.
+
+## Emergency Cancellation
+
+Emergency cancellation (`Ctrl+C`) is available at all times regardless of permission profile, Work Mode, or transfer consent state. No permission escalation can prevent a user from cancelling an in-progress agent loop. Active operations that are cancelled produce an `OperationCancelled` terminal event in the journal, which is used by the recovery pass to avoid marking them as `OperationUnknownOutcome` on next startup.

@@ -1,0 +1,214 @@
+---
+title: "Typhoon: thcode's Primary Reasoning Provider"
+sidebarTitle: "Typhoon"
+description: "Typhoon is thcode's default provider using an OpenAI-compatible endpoint. Understand the provider registry, health checks, and stub roadmap providers."
+---
+
+Typhoon is the only production-ready reasoning provider in thcode's current release. It connects directly from your machine to the official `api.opentyphoon.ai` endpoint using an OpenAI-compatible protocol, so provider requests never pass through a hosted thcode proxy. The provider registry enforces explicit selection with no silent fallback, ensuring the model you configured is always the model that runs.
+
+## The Provider Registry
+
+The `ProviderRegistry` class owns provider lifecycle for a session. At startup, `createDefaultProviderRegistry()` seeds it with one fully-functional adapter (Typhoon) and three roadmap stubs (Pathumma, OpenThaiGPT, ThaLLE). The registry exposes a small, deliberate surface:
+
+| Method / Getter | Purpose |
+|---|---|
+| `register(adapter)` | Add an adapter keyed by `adapter.capabilities.provider` |
+| `get(id)` | Retrieve an adapter by provider id, or `undefined` if not registered |
+| `list()` | Return all registered adapters as an array |
+| `select(id)` | Activate a provider for the session; **throws** on unknown id |
+| `selected` | Get the currently active adapter; **throws** if the current id is unregistered |
+| `selectedId` | Get the string id of the currently active provider |
+
+### Explicit selection, no silent fallback
+
+`UnknownProviderError` is thrown — never swallowed — whenever `select()` or `selected` encounters an id that has no registered adapter. The error message makes this contract explicit:
+
+```typescript
+class UnknownProviderError extends Error {
+  constructor(id: string) {
+    super(`Unknown provider "${id}". Selection is explicit; thcode never silently falls back.`);
+    this.name = 'UnknownProviderError';
+  }
+}
+```
+
+This means you can rely on the selected provider being exactly what was configured. If a provider is unavailable, the session surfaces the reason rather than quietly continuing with a different model.
+
+### The `ProviderAdapter` interface
+
+Every provider — including the roadmap stubs — implements `ProviderAdapter`:
+
+```typescript
+interface ProviderAdapter {
+  readonly capabilities: ProviderCapabilities;
+  availability(apiKeyPresent: boolean): ProviderAvailability;
+  classifyError(err: unknown): RetryableErrorMeta;
+  finalize?(input: ProviderFinalizationInput): FinalizedProviderRequest;
+  complete(request: ProviderRequest, apiKey: string, onToken?: TokenSink): Promise<ProviderResult>;
+}
+```
+
+`capabilities` is a static descriptor; `availability()` is computed at call time from whether a credential is present. Adapters never read the credential store themselves — the key is injected at `complete()` time.
+
+#### Capability fields
+
+```typescript
+interface ProviderCapabilities {
+  readonly modelId: string;
+  readonly provider: string;
+  readonly inputModalities: readonly Modality[];
+  readonly contextLimit: number | null;   // null = unverified; treat as unavailable
+  readonly supportsToolCalls: boolean;
+  readonly supportsStreaming: boolean;
+  readonly dataHandling: string;
+}
+```
+
+<Note>
+`contextLimit: null` means no verified limit exists for that provider/model yet. Consumers must treat `null` as "unverified" and must not derive a numeric percentage or token count from it.
+</Note>
+
+## The Typhoon Adapter
+
+`TyphoonAdapter` is thcode's only Release-1 reasoning adapter. Its static capabilities are:
+
+```typescript
+{
+  modelId: 'typhoon-v2.5-instruct',
+  provider: 'typhoon',
+  inputModalities: ['text'],
+  contextLimit: null,          // pending verification
+  supportsToolCalls: true,
+  supportsStreaming: true,
+  dataHandling:
+    'Requests sent directly from this machine to api.opentyphoon.ai; key stays local (ADR 0007).',
+}
+```
+
+### OpenAI-compatible endpoint
+
+All requests go to `https://api.opentyphoon.ai/v1/chat/completions` as streaming JSON over HTTPS. The adapter serializes the normalized message list and any tool schemas into the standard OpenAI chat-completions shape and parses the SSE stream back into a `ProviderResult`:
+
+```typescript
+type ProviderResult =
+  | { kind: 'final'; text: string; usage?: ProviderUsage }
+  | { kind: 'tool_call'; toolName: string; input: Record<string, unknown>; usage?: ProviderUsage };
+```
+
+### Request finalization and integrity
+
+Before `complete()` is called, the request must be *finalized* — the adapter serializes the message list to `Uint8Array`, computes a SHA-256 digest, and binds both to an immutable `ContextManifest`. When `complete()` runs, it re-derives the expected bytes from the same inputs and rejects any mismatch. This prevents a tampered or stale request from being dispatched silently.
+
+### Error classification
+
+`classifyError()` maps HTTP status codes to retry metadata so the agent loop can handle transient failures correctly:
+
+| Status | Kind | Retryable |
+|---|---|---|
+| 429 | `rate-limit` | Yes |
+| 5xx | `server` | Yes |
+| 401 / 403 | `auth` | No |
+| Other 4xx | `client` | No |
+| `TypeError` | `network` | Yes |
+| Other | `unknown` | No |
+
+## Roadmap Providers
+
+Three additional Thai-ecosystem providers are catalogued in the registry but are **not yet callable**. They report `authState: 'unconfigured'` and throw `ProviderUnavailableError` if dispatch is attempted.
+
+<CardGroup cols={3}>
+  <Card title="Pathumma" icon="circle-dashed">
+    Model: `pathumma-llm` · Context: 32,000 tokens · No endpoint configured
+  </Card>
+  <Card title="OpenThaiGPT" icon="circle-dashed">
+    Model: `openthaigpt-1.5` · Context: 32,000 tokens · No endpoint configured
+  </Card>
+  <Card title="ThaLLE" icon="circle-dashed">
+    Model: `thalle-7b` · Context: 32,000 tokens · No endpoint configured
+  </Card>
+</CardGroup>
+
+<Note>
+Catalogued stub providers appear in `/models` output with a `unavailable: no endpoint configured` reason. They cannot be selected for a reasoning turn until a real endpoint, authentication contract, and streaming parser are implemented.
+</Note>
+
+## Provider Health Checks
+
+thcode's health check system is generation-bound: a provider only becomes `available` after a live probe of the exact stored configuration passes. Stale results from an older configuration generation are rejected.
+
+### Health lifecycle
+
+```
+unconfigured → configured → checking → available
+                                     ↘ unavailable
+                                     ↘ unhealthy
+                                     ↘ quarantined
+```
+
+<Steps>
+  <Step title="unconfigured">
+    No effective-configuration generation exists. The provider has no credential and no endpoint to verify.
+  </Step>
+  <Step title="configured">
+    A credential has been stored and a configuration generation registered. The provider is ready to be health-checked but has not been proven live yet.
+  </Step>
+  <Step title="checking">
+    A live probe is in flight. The provider cannot be promoted to `available` by a probe that returns after a newer generation has been registered.
+  </Step>
+  <Step title="available / unavailable / unhealthy">
+    `available` — the probe passed. `unavailable` — a transient failure (retryable). `unhealthy` — a fatal failure (auth, configuration, or protocol mismatch); requires explicit correction. `quarantined` — credential was rejected; the provider is locked until an explicit retest passes.
+  </Step>
+</Steps>
+
+### Typhoon health probe
+
+The Typhoon probe makes a single authenticated `GET /models` request to the configured endpoint. It validates both the HTTP status and the OpenAI-compatible response schema:
+
+<Tabs>
+  <Tab title="Probe outcomes">
+    | Cause code | Category | Retryable |
+    |---|---|---|
+    | `no-credential` | `auth` | No |
+    | `auth-rejected` | `auth` | No |
+    | `rate-limited` | `quota` | Yes (5 s backoff) |
+    | `http-5xx` | `connectivity` | Yes |
+    | `protocol-non-json` | `protocol` | No |
+    | `protocol-schema-mismatch` | `protocol` | No |
+    | `network` | `connectivity` | Yes |
+  </Tab>
+  <Tab title="Probe never exposes secrets">
+    The probe receives the API key in-scope only for the duration of the HTTP call. The returned `HealthProbeResult` carries only an opaque evidence string (`typhoon:models:<count>:<adapterVersion>`) on success, or a `safeMessage` and `causeCode` on failure — never the key value.
+  </Tab>
+</Tabs>
+
+### `EffectiveConfigurationGeneration`
+
+The probe runs against an immutable generation object that records the endpoint, credential revision, adapter version, and model id — but never the secret:
+
+```typescript
+interface EffectiveConfigurationGeneration {
+  readonly id: string;               // e.g. "typhoon-gen-abc123-k8f2z"
+  readonly providerId: string;       // "typhoon"
+  readonly endpoint: string;         // "https://api.opentyphoon.ai/v1"
+  readonly credentialRevision: string; // opaque fingerprint, not the key
+  readonly adapterVersion: string;
+  readonly modelId: string;
+  readonly dependencyIdentity: string;
+  readonly createdAt: string;        // UTC ISO-8601
+}
+```
+
+## Inspecting Providers in the CLI
+
+<CardGroup cols={2}>
+  <Card title="/models" icon="magnifying-glass">
+    Lists all registered adapters with their model id, availability state, context limit (or "unverified" for `null`), tool-call support, and data-handling note. Unresolved pins are labelled as such.
+  </Card>
+  <Card title="/connections" icon="plug">
+    Shows provider and service health alongside connection identity. Displays the endpoint host and generation id — never the API key or secret.
+  </Card>
+</CardGroup>
+
+<Warning>
+A provider shown as `configured` in `/connections` has a stored credential but has not yet completed a live health check. Use `/connections` after `/connect` to confirm the probe reaches `available` before starting a reasoning-heavy session.
+</Warning>

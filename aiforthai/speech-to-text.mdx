@@ -1,0 +1,139 @@
+---
+title: "Speech-to-Text: Thai Audio Transcription"
+sidebarTitle: "Speech-to-Text"
+description: "Speech-to-Text transcribes Thai audio to text via the AI for Thai ASR endpoint. Currently catalogued in thcode — discoverable and inspectable, integration pending."
+---
+
+Speech-to-Text is the conversation-category specialist service in thcode's AI for Thai catalog. It performs automatic speech recognition (ASR) on Thai audio, converting spoken language into a text transcript along with timed segments and a confidence score. In a coding workflow, this opens a path for developers to dictate Thai-language voice instructions, comments, or function descriptions, which thcode can then pass to Typhoon for interpretation, translation, or code generation.
+
+<Note>
+  Speech-to-Text is **catalogued** in this release. It is discoverable and fully inspectable via `/tools`, but the endpoint mapping, live transport, and contract test are a subsequent integration phase. Invoking the service now returns a stub refusal: `"Catalogued — Not available yet"`.
+</Note>
+
+## Service Identity
+
+| Field           | Value                                              |
+| --------------- | -------------------------------------------------- |
+| Service ID      | `speech-to-text`                                   |
+| Upstream name   | `Speech-to-Text`                                   |
+| Thai name       | `คำพูดเป็นข้อความ`                                  |
+| Category        | `conversation`                                     |
+| Modality        | `audio`                                            |
+| Endpoint        | `https://api.aiforthai.in.th/partii-webapi`        |
+| Support level   | `catalogued`                                       |
+| Contract ver.   | `1.0.0`                                            |
+| Adapter ver.    | `1.0.0`                                            |
+
+## Search Terms
+
+The router matches Speech-to-Text against the following terms. You can use any of them in the `/tools search` command:
+
+```
+asr   ถอดเสียง   speech   transcription
+```
+
+## Handler: Input Contract
+
+The `SpeechToTextSpecialistHandler` builds a transport request from a **binary audio artifact**. The handler reads the first prepared artifact, validates that it carries bytes (`contentKind: 'bytes'`), base64-encodes the audio data, and assembles the JSON request body.
+
+```json title="Request body sent to the ASR endpoint"
+{
+  "audio": "<base64-encoded audio bytes>",
+  "mime": "<artifact media type, e.g. audio/wav>"
+}
+```
+
+The request is dispatched as an authenticated `POST` to `https://api.aiforthai.in.th/partii-webapi` with:
+
+- `Authorization: Bearer <key>` — the raw API key is resolved in scope only and never appears in Evidence, logs, or the secret-free `headersSummary` (which shows `[redacted]`).
+- `Content-Type: application/json`
+
+If the artifact is absent, empty, or not of kind `bytes`, the handler throws before a transport call is made.
+
+## Handler: Output Contract
+
+The `SpeechToTextSpecialistHandler` maps the upstream JSON response into three typed `SpecialistFieldValue` fields:
+
+<Tabs>
+  <Tab title="transcript">
+    **Kind:** `text`
+
+    Mapped from the `transcript` key in the upstream response. Present when `transcript` is a non-empty string. An empty string and `null` are both treated as not-present, and the field is listed in `emptyFields`.
+
+    ```json
+    { "kind": "text", "value": "สวัสดีชาวโลก", "present": true }
+    ```
+  </Tab>
+  <Tab title="segments">
+    **Kind:** `structured`
+
+    Mapped from the `segments` array. Each element must be a non-null, non-array object with a `text` string field to be kept; invalid elements are dropped. When at least one valid segment survives the filter, they are wrapped in `{ items: [...] }`.
+
+    ```json
+    {
+      "kind": "structured",
+      "value": {
+        "items": [
+          { "text": "สวัสดี", "start": 0.0, "end": 0.8 },
+          { "text": "ชาวโลก", "start": 0.9, "end": 1.5 }
+        ]
+      },
+      "present": true
+    }
+    ```
+  </Tab>
+  <Tab title="confidence">
+    **Kind:** `number`
+
+    Mapped from the `confidence` key. Present when the value is a non-null `number`. Propagated to the top-level `SpecialistResult.confidence` field when present.
+
+    ```json
+    { "kind": "number", "value": 0.92, "present": true }
+    ```
+  </Tab>
+</Tabs>
+
+Any key that is absent, `null`, or of the wrong type produces `present: false` and is appended to `emptyFields`. The handler never invents fields that were not in the upstream response.
+
+## Fixture
+
+The handler ships with a deterministic, built-in (non-user) fixture used for health probes. The fixture is a minimal valid WAV file: a 44-byte header (PCM, mono, 8000 Hz, 16-bit) followed by 200 bytes of zero PCM samples — 244 bytes total, representing 100 silent samples. The health canary verifies the endpoint accepts it and returns a valid JSON object. The fixture's expected outputs are:
+
+```typescript
+EXPECTED_TRANSCRIPT = 'สวัสดีชาวโลก'
+EXPECTED_CONFIDENCE = 0.92
+EXPECTED_SEGMENTS   = [
+  { text: 'สวัสดี', start: 0.0, end: 0.8 },
+  { text: 'ชาวโลก', start: 0.9, end: 1.5 },
+]
+```
+
+The canary uses `audio/wav` as the media type; any other media type is rejected before the probe is dispatched.
+
+## Potential Uses in Coding Tasks
+
+Once Speech-to-Text returns a Thai transcript, Typhoon can use it to:
+
+- **Transcribe voice instructions** — a developer speaking Thai can dictate what code to write, and Typhoon interprets the transcript as a task description.
+- **Convert spoken Thai comments** into inline source-code comments or docstrings.
+- **Pipe the transcript to NER** — the transcript can be handed off to Named Entity Recognition to identify names, locations, or organizations mentioned in a voice note.
+- **Populate UI strings** — voice-dictated copy can be transcribed and inserted directly into Thai-language user-facing strings.
+
+## Using `/tools` with Speech-to-Text
+
+```bash title="Inspect the Speech-to-Text catalog entry"
+/tools inspect speech-to-text
+```
+
+```bash title="Search for conversation or ASR services"
+/tools search asr
+/tools search ถอดเสียง
+```
+
+<Warning>
+  The inspect output will show `invokable: false` with reason `"Catalogued — Not available yet"`. Attempting to invoke Speech-to-Text before integration is complete will produce a pre-transport refusal — no network call is made.
+</Warning>
+
+## Phase 1 Role
+
+Speech-to-Text is part of both the **Verification Quartet** and the **Demo Portfolio**. In Phase 1, it must pass a live contract test and a complete Typhoon-driven coding scenario before it is considered demo-certified. See ADR 0011 for the full Phase 1 roadmap.

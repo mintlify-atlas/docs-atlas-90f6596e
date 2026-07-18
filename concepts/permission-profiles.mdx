@@ -1,0 +1,123 @@
+---
+title: "Permission Profiles: Manual, Assisted, Full Access"
+sidebarTitle: "Permission Profiles"
+description: "thcode's three permission profiles control when actions execute automatically versus asking for approval. Profiles are orthogonal to Work Mode and session-scoped."
+---
+
+A Permission Profile controls **when** an action that the active Work Mode permits is executed automatically versus when thcode pauses and asks the developer for approval. Profiles are session-scoped — they apply only to the current Runtime Activation, are never persisted to disk, and do not affect future sessions unless you choose the same profile again. Every new interactive session starts in the default profile: **Manual**.
+
+Permission Profile and Work Mode are fully independent dimensions of session state. Neither implies the other. The same profile behaves differently depending on the active mode: `full-access` in Plan mode auto-approves read-only actions, but it still cannot authorize mutations — that restriction lives at the Work Mode layer, not here. See [Work Modes](/concepts/work-modes) for the structural read-only guarantee.
+
+## The three profiles
+
+<CardGroup cols={3}>
+  <Card title="Manual" icon="hand">
+    **Default for every new session.** Reads are auto-approved. Any mutating action pauses and asks the developer before proceeding.
+  </Card>
+  <Card title="Assisted" icon="robot">
+    Reads are auto-approved. Low-risk mutations are auto-approved. Uncertain or high-risk mutations ask. An AI risk classifier may recommend but never overrides policy.
+  </Card>
+  <Card title="Full Access" icon="bolt">
+    Every action permitted by the active Work Mode is auto-approved, except sensitive operations which still require the explicit `sensitiveOverride` flag. Session-only.
+  </Card>
+</CardGroup>
+
+### Manual
+
+Manual is the right profile for first-time use, high-stakes changes, or any situation where you want to review every write, delete, or shell command before it runs. Non-mutating reads (`read_file`, `list_dir`, `search`) are approved automatically — Manual is not a confirm-everything mode, only a confirm-mutations mode.
+
+### Assisted
+
+Assisted reduces interruptions for routine low-risk mutations while keeping the developer in control for anything uncertain. The deterministic policy always runs first. An AI risk classifier is an extension point that may only *recommend* escalation; if the classifier is uncertain, authority returns to the developer via `ask`. The classifier can never grant itself `allow` on a high-risk action.
+
+```typescript
+// From permissions/policy.ts — Assisted profile logic
+case 'assisted':
+  if (!action.mutating) {
+    return { outcome: 'allow', reason: 'assisted-read-allowed' };
+  }
+  // AI risk classifier (ADR 0012) is an extension point that may only
+  // *recommend* escalation, never override.
+  if (action.risk === 'low') {
+    return { outcome: 'allow', reason: 'assisted-low-risk-allowed' };
+  }
+  return { outcome: 'ask', reason: 'assisted-uncertain-asks-developer' };
+```
+
+### Full Access
+
+Full Access is for experienced and unattended workflows. It auto-approves every action within the declared workspace boundaries and active Work Mode — no per-action prompts for non-sensitive operations. This is a session-scoped opt-in, visible as a persistent terminal indicator, and accompanied by a session-scoped warning.
+
+<Warning>
+  Full Access means unattended operation **inside declared boundaries**, not unrestricted control of the machine. Workspace boundaries, credential secrecy, audit evidence, quota limits, and emergency cancellation are always preserved regardless of profile.
+</Warning>
+
+**Sensitive transfers under Full Access:** Even with `full-access`, sensitive operations (such as `transfer`) always ask unless a separate explicit `sensitiveOverride` flag is set for the session. This requires a deliberate second opt-in beyond selecting the profile.
+
+## The `evaluatePermission()` decision tree
+
+The permission policy engine in `permissions/policy.ts` is pure and side-effect free. It evaluates every action proposal through a fixed sequence:
+
+<Steps>
+  <Step title="Plan mode check (highest precedence)">
+    If Work Mode is `plan` and the action is mutating, return `deny` with reason `plan-mode-is-read-only`. This is non-negotiable and runs before any profile logic.
+  </Step>
+  <Step title="Sensitive action check">
+    If the action is `sensitive`, ask — unless profile is `full-access` **and** `sensitiveOverride` is set. When that override is present, allow with `full-access-sensitive-override`.
+  </Step>
+  <Step title="Profile-driven decision">
+    For non-sensitive actions in Build mode, the profile decides:
+    - `full-access` → `allow` (`full-access-auto-approve`)
+    - `assisted`, non-mutating → `allow` (`assisted-read-allowed`)
+    - `assisted`, mutating, `risk === 'low'` → `allow` (`assisted-low-risk-allowed`)
+    - `assisted`, mutating, other risk → `ask` (`assisted-uncertain-asks-developer`)
+    - `manual`, non-mutating → `allow` (`manual-read-allowed`)
+    - `manual`, mutating → `ask` (`manual-requires-approval`)
+  </Step>
+</Steps>
+
+## Decision matrix
+
+The table below shows every combination of profile and action type and the resulting `PermissionOutcome`. All cells assume **Build mode** — in Plan mode, all mutating actions are `deny` regardless of profile.
+
+| Profile | Non-mutating read | Low-risk mutation | High-risk mutation | Sensitive operation | Sensitive + override |
+|---|---|---|---|---|---|
+| `manual`      | `allow` | `ask`   | `ask`   | `ask`   | `ask`   |
+| `assisted`    | `allow` | `allow` | `ask`   | `ask`   | `ask`   |
+| `full-access` | `allow` | `allow` | `allow` | `ask`   | `allow` |
+
+## The Policy Enforcement Point
+
+The `PolicyEnforcementPoint` (PEP) in `permissions/pep.ts` is the single authorized surface for local effect authorization. It wraps `evaluatePermission()` and additionally consults the Permission Matrix for enforcement capability availability:
+
+- **Unknown action class** → `deny` with reason `unknown-action-class-not-authoritative`. The PEP never infers a safer class or repairs the proposal.
+- **Required platform enforcement capability unavailable** → `deny` with the canonical `ENFORCEMENT UNVERIFIED` token, never a permissive decision.
+
+```typescript
+// From permissions/pep.ts
+if (!def) {
+  return {
+    outcome: 'deny',
+    reason: 'unknown-action-class-not-authoritative',
+    ...
+  };
+}
+
+if (def.requiresEnforcementCapability && input.enforcementAvailable === false) {
+  return {
+    outcome: 'deny',
+    reason: ENFORCEMENT_UNVERIFIED,
+    ...
+  };
+}
+```
+
+The `EffectExecutor.authorize()` method throws `EffectNotAuthorizedError` for any non-`allow` outcome, including `ask` (which requires the separate developer-approval flow before `authorize` can succeed).
+
+## Inspecting the current permission matrix
+
+Run `/permissions` in the thcode terminal to open the interactive Permission Selector and view the current effective permission matrix for your session. This shows both the active Work Mode and Permission Profile together, because both dimensions must be visible at the same time.
+
+<Tip>
+  Because Permission Profile is session-scoped and never persisted, you can freely experiment with `full-access` for a batch task and return to `manual` the next time you open thcode — no configuration file to clean up.
+</Tip>

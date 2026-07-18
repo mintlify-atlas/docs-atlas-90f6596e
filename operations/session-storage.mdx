@@ -1,0 +1,260 @@
+---
+title: "Session Storage: Encrypted SQLite and Journals"
+sidebarTitle: "Session Storage"
+description: "thcode persists sessions in encrypted SQLite with a durable event journal. Sessions are globally accessible and restore in Manual mode with a fresh Runtime Activation."
+---
+
+thcode stores every conversation in a single SQLite database that lives in the native user-state directory for the current OS user. Session metadata, transcript entries, token ledger records, and context extensions are all encrypted before they reach the database. A separate durable event journal — co-located in the same SQLite file — provides crash-consistent commit visibility for every operation that modifies session state. Together, these two layers mean your conversation history survives process crashes, model switches, and workspace moves while remaining unreadable without the per-install encryption key.
+
+## Platform Paths
+
+The database path is determined by `sessionsDbPath()` in `platform/paths.ts`, which resolves to the OS-native user-state directory:
+
+```typescript
+// platform/paths.ts
+function thcodeStateDir(): string {
+  if (process.platform === 'win32') {
+    const base = process.env.LOCALAPPDATA ?? path.join(os.homedir(), 'AppData', 'Local');
+    return path.join(base, 'thcode');
+  }
+  if (process.platform === 'darwin') {
+    return path.join(os.homedir(), 'Library', 'Application Support', 'thcode');
+  }
+  const xdg = process.env.XDG_STATE_HOME ?? path.join(os.homedir(), '.local', 'state');
+  return path.join(xdg, 'thcode');
+}
+
+export function sessionsDbPath(): string {
+  return path.join(thcodeStateDir(), 'sessions.db');
+}
+```
+
+| Platform | Path |
+|----------|------|
+| Windows | `%LOCALAPPDATA%\thcode\sessions.db` |
+| macOS | `~/Library/Application Support/thcode/sessions.db` |
+| Linux | `$XDG_STATE_HOME/thcode/sessions.db` (fallback: `~/.local/state/thcode/sessions.db`) |
+
+## Encryption at Rest
+
+Every sensitive field is encrypted with AES-256-GCM before it is written to SQLite (ADR 0018). This includes transcript content, session names, workspace paths, context extension envelopes, and any other content capable of revealing source code or personal data.
+
+### The EncryptedField Envelope
+
+```typescript
+// sessions/crypto.ts
+interface EncryptedField {
+  n: string;   // Base64-encoded 12-byte nonce (unique per write)
+  c: string;   // Base64-encoded ciphertext
+  t: string;   // Base64-encoded 16-byte GCM authentication tag
+  v: number;   // Schema version (also bound as AAD)
+  alg: string; // Algorithm identifier — always 'aes-256-gcm'
+}
+```
+
+Each encrypted record uses a fresh random nonce and binds its record identity, schema version, and algorithm as additional authenticated data (AAD). This prevents ciphertext from being silently transplanted between records even if the attacker has access to the raw database file.
+
+```typescript
+// AAD is derived from: recordId + ':v' + version + ':' + algorithm
+// e.g. "session:abc123:name:v1:aes-256-gcm"
+encryptField(plaintext, dataKey, `session:${id}:name`);
+```
+
+### Key Lifecycle
+
+A 32-byte random data-encryption key (`generateDataKey()`) is generated on first use and stored in the operating-system credential store — Windows Credential Manager on Windows-first deployments. The key is **never** written to SQLite, project files, logs, prompts, or telemetry.
+
+```typescript
+// On first open: generate and persist the key
+const fresh = generateDataKey(); // randomBytes(32)
+
+// On subsequent opens: retrieve from the credential store
+const keyB64 = credentials.getSync(SESSION_DATA_KEY_ID);
+const key = Buffer.from(keyB64, 'base64'); // must be 32 bytes
+```
+
+If the database file already exists but the encryption key is unavailable, `SessionStore.open()` returns `{ ok: false, mode: 'recovery-locked' }` and refuses to open — it never replaces a key that might be the only key capable of decrypting existing data.
+
+<Warning>
+  Losing the data-encryption key makes encrypted session content permanently unrecoverable. The CLI discloses this limitation rather than implying a backup exists.
+</Warning>
+
+### Workspace Binding Index
+
+The workspace path stored per session is encrypted. However, SQLite needs to filter sessions by workspace without decrypting every row. This is solved with a keyed, non-reversible HMAC:
+
+```typescript
+// workspaceBindingIndex produces a deterministic, non-reversible index value
+// computed as HMAC-SHA-256(key, workspacePath)
+function workspaceBindingIndex(workspacePath: string, key: Buffer): string {
+  return createHmac('sha256', key).update(workspacePath).digest('hex');
+}
+```
+
+The index value is stored alongside the encrypted path in `sessions.workspace_index` and used for workspace-filtered listing.
+
+## SessionStore
+
+`SessionStore` is the SQLite-backed repository for all session data. It is opened via the static `SessionStore.open()` factory, which also runs schema migration and journal DDL initialization.
+
+The store exposes typed methods for all session operations:
+
+```typescript
+// Create and retrieve sessions
+store.createSession(name: string, workspacePath: string): SessionRecord
+store.getSession(id: string): SessionRecord | undefined
+store.listSessions(): SessionRecord[]
+store.listSessionsForWorkspace(workspacePath: string): SessionRecord[]
+store.deleteSession(id: string): void
+
+// Transcript
+store.appendTranscript(sessionId, role, content): TranscriptEntry
+store.getTranscript(sessionId): TranscriptEntry[]
+
+// Token ledger
+store.recordTokens(entry): void
+store.tokenTotals(sessionId): { input, output, cached }
+
+// Context governance
+store.appendContextExtension(envelope): number
+store.listContextExtensions(sessionId): ContextExtensionRecord[]
+store.recoverContextGovernance(sessionId): ContextRecoveryState
+```
+
+<Note>
+  SQLite operates in WAL (Write-Ahead Log) mode. This provides atomic writes and allows the journal and session tables to be updated in coordinated transactions.
+</Note>
+
+### TranscriptRole Types
+
+```typescript
+type TranscriptRole = 'user' | 'assistant' | 'tool' | 'system';
+```
+
+Each `TranscriptEntry` carries a sequential `seq` number within its session, a role, an encrypted content field, and a timestamp. Transcript content is decrypted on read inside the trusted thcode process — SQLite never holds plaintext content.
+
+## SessionJournal
+
+The journal is the **sole commit-visibility authority** for all durable operations. It is stored in the same SQLite file as session data, co-created by the same `SessionStore.open()` call via `JOURNAL_DDL`.
+
+```sql
+CREATE TABLE IF NOT EXISTS journal (
+  event_id        TEXT PRIMARY KEY,
+  session_id      TEXT NOT NULL,
+  seq             INTEGER NOT NULL,
+  aggregate_version INTEGER NOT NULL,
+  operation_id    TEXT NOT NULL DEFAULT '',
+  payload_kind    TEXT NOT NULL,
+  payload_json    TEXT NOT NULL,
+  envelope_json   TEXT NOT NULL,
+  created_at      TEXT NOT NULL,
+  UNIQUE(session_id, seq)
+);
+```
+
+`SessionRepository.append()` wraps every write in a single SQLite transaction that allocates the next `(session_id, seq)` and `aggregate_version` in one atomic step. Re-appending the same `event_id` is a no-op — the journal is idempotent by event identity.
+
+### Recovery Pass
+
+On every `SessionRepository` construction, a recovery pass runs:
+
+1. It finds all operations with a lifecycle-fact event (`EffectDispatchCommitted`) that have no corresponding terminal event (`OperationSucceeded`, `OperationFailed`, `OperationBlocked`, `OperationCancelled`, `OperationUnknownOutcome`).
+2. For each incomplete operation, it appends an `OperationUnknownOutcome` event.
+
+This ensures that after any crash, incomplete operations are always visible and never silently omitted from the operation history.
+
+## Global vs. Local Session Stores
+
+Sessions are **global to the local OS user**, not scoped to a single workspace (ADR 0017). This means:
+
+- `/session` can browse sessions from any working directory
+- Sessions can be filtered by current workspace, other workspaces, or unbound sessions
+- Deleting or moving a workspace does not delete the session transcript
+
+Each session retains an explicit Workspace Binding. Opening a session from a different directory does **not** silently rebind it to that directory.
+
+<CardGroup cols={2}>
+  <Card title="Global Store" icon="database">
+    One SQLite file at the OS-native user-state path. Stores all sessions across all workspaces. Survives workspace deletion.
+  </Card>
+  <Card title="Workspace Binding" icon="folder-tree">
+    Each session records its workspace path (encrypted) and a workspace index (HMAC). The binding is preserved, not overwritten, on re-open from another directory.
+  </Card>
+</CardGroup>
+
+## Saved Transcript vs. Active Context
+
+A session's **Saved Transcript** and the **Active Model Context** are distinct and independently managed (ADR 0014):
+
+<Tabs>
+  <Tab title="Saved Transcript">
+    The complete, unabridged conversation history persisted in the encrypted `transcript_entries` table. Every turn is stored verbatim and is never deleted, rewritten, or compacted by automatic processes. Users can browse the full history at any time regardless of context budget.
+  </Tab>
+  <Tab title="Active Model Context">
+    The bounded window built from recent turns, pinned turns, selected workspace evidence, tool definitions, and inspectable summaries of older content. This is what actually gets sent to the reasoning model. It is limited by the selected model's Effective Context Capacity and may include compacted summaries of older transcript turns.
+  </Tab>
+</Tabs>
+
+When the transcript fits comfortably within the context budget it may be sent verbatim. As the session grows, Context Compaction summarizes older unpinned material while keeping recent and pinned turns verbatim. Compaction never deletes the local transcript.
+
+## Context Utilization Meter
+
+The context utilization meter reports **Active Context Utilization** as a percentage of the selected model's Effective Context Capacity (ADR 0015). This is not cumulative token usage.
+
+```text
+Effective Context Capacity = raw context limit
+  − max(configured output reserve, 8% of raw limit)
+  − max(2,048 tokens, 2% of raw limit)
+```
+
+For a 128,000-token model with no custom output reserve, the fallback Effective Context Capacity is approximately 115,200 tokens.
+
+The compact status-bar indicator is `Ctx N%`, where N is the current utilization percentage. Severity bands apply additional styling:
+
+| Range | Band |
+|-------|------|
+| 0–69% | Green |
+| 70–84% | Amber |
+| 85–94% | Orange |
+| 95–100% | Red |
+
+### Context Compaction
+
+`compactContext()` runs automatically before a provider call if the projected Active Model Context would exceed Effective Context Capacity. It targets ≤70% utilization after compaction:
+
+1. Identifies old, unprotected (non-pinned) items
+2. Replaces their content with a deterministic summary (up to 240 characters)
+3. Marks the items as `compacted` with a transformation record
+4. Re-checks that protected content still fits
+
+If protected content alone exceeds capacity after compaction, thcode enters **Irreducible Context Overflow** and stops before the provider call, displaying a token breakdown and explicit remedies.
+
+<Tip>
+  Use `/context` to inspect which turns are verbatim, compacted, or excluded from the next request. Use `/compact` to trigger manual compaction before reaching the automatic threshold.
+</Tip>
+
+## Session Restoration Boundary
+
+Opening a Saved Session restores its complete knowledge state but **resets authority** (ADR 0016):
+
+**Restored from storage:**
+- Complete Chat Transcript
+- Selected model and Work Mode
+- Pinned turns and compaction history
+- Referenced-artifact manifest and plans
+- Tool and verification history
+- Cumulative Token Usage
+- Workspace path
+
+**Always reset on open:**
+- Runtime Activation (always fresh)
+- Permission Profile (always resets to **Manual**)
+- Full Access (never restored)
+- Sensitive-transfer authorization (never restored)
+- Temporary action approvals (never restored)
+
+<Warning>
+  A historical Full Access choice cannot silently regain authority after thcode is closed and reopened. Every new session open begins with Manual permission profile, regardless of what was active when the session was last saved.
+</Warning>
+
+API keys remain separate in the OS credential store and are referenced by provider identity — they are never copied into session storage.

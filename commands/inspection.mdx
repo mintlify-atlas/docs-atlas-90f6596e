@@ -1,0 +1,294 @@
+---
+title: "Inspection Commands: Status, Permissions, Tools"
+sidebarTitle: "Inspection"
+description: "thcode's inspection commands expose session state, permission matrix, provider health, tool catalog, context utilization, and activity history without mutating anything."
+---
+
+The inspection commands give you a precise, read-only view of every meaningful dimension of a running thcode session. None of them mutate state, execute shell commands, or consume authority. Output is identical across interactive, redirected, linearized, and headless JSON surfaces — the same fields, the same canonical tokens, the same order.
+
+---
+
+## `/status` — canonical session status
+
+**Alias:** `/st`  
+**Requires approval:** No
+
+`/status` renders the `StatusProjection` — the single serializable object that aggregates session health into one consistent snapshot.
+
+<Accordion title="StatusProjection fields">
+
+| Field | Type | Description |
+|---|---|---|
+| `workMode` | `'plan' \| 'build'` | Current Work Mode |
+| `permissionProfile` | `'manual' \| 'assisted' \| 'full-access'` | Active permission profile |
+| `fullAccess` | `boolean` | Whether Full Access is currently enabled |
+| `providerId` | `string` | Active provider identity |
+| `modelId` | `string` | Active model identity |
+| `healthState` | `'unconfigured' \| 'configured' \| 'checking' \| 'available' \| 'unavailable' \| 'unhealthy' \| 'quarantined'` | Provider health |
+| `contextPercent` | `number \| 'percentage unavailable'` | Context window utilization as a percentage, or the canonical token when no budget exists |
+| `enforcementVerified` | `boolean` | Whether authority enforcement is verified |
+
+</Accordion>
+
+The full `ConversationProjection` extends `StatusProjection` with the session identity (`sessionId`, `name`, `workspaceRoot`, `lastActivity`), the transcript, and the context projection. `/status` renders the status slice specifically.
+
+`contextPercent` uses the canonical measurement token `'percentage unavailable'` when no real budget is configured — it is never shown as `0%` or omitted.
+
+---
+
+## `/permissions` — versioned PermissionMatrix
+
+**Alias:** `/perm`  
+**Requires approval:** No
+
+`/permissions` displays the `AuthorityProjection` — the current state of every authority dimension for this activation.
+
+<Accordion title="AuthorityProjection fields">
+
+| Field | Type | Description |
+|---|---|---|
+| `activationId` | `string` | Runtime activation identity |
+| `activationRevision` | `number` | Monotonic revision counter for the activation |
+| `workspaceId` | `string` | Workspace binding |
+| `workMode` | `'plan' \| 'build'` | Current Work Mode |
+| `permissionProfile` | `'manual' \| 'assisted' \| 'full-access'` | Active permission profile |
+| `fullAccess` | `boolean` | Whether Full Access is enabled |
+| `sensitiveTransferOverride` | `boolean` | Full-Access-only sensitive-transfer override (separate authority from `fullAccess`) |
+| `activeBoundaryExpansionCount` | `number` | Count of active (non-revoked, non-expired) Boundary Expansions |
+| `enforcementVerified` | `boolean` | Whether enforcement is verified |
+
+</Accordion>
+
+Each of these fields is independently addressable — none of them implies any other. `workMode` and `permissionProfile` are separate authority axes; `fullAccess` is a distinct flag from `permissionProfile: 'full-access'`.
+
+---
+
+## `/connections` — provider and service health
+
+**Alias:** `/conn`  
+**Requires approval:** No
+
+`/connections` shows the health state and connection identity for every configured provider and service. The output uses the canonical `healthState` token set:
+
+| State | Meaning |
+|---|---|
+| `unconfigured` | Provider has no credentials or configuration |
+| `configured` | Credentials present but health not yet verified |
+| `checking` | Health probe in progress |
+| `available` | Provider is reachable and responding |
+| `unavailable` | Provider is unreachable |
+| `unhealthy` | Provider is reachable but returning errors |
+| `quarantined` | Provider has been isolated due to repeated failures |
+
+Connection identity includes the provider ID and the workspace-scoped binding. No credentials or secrets are rendered.
+
+---
+
+## `/models` — Typhoon model inspection
+
+**Requires approval:** No  
+**No aliases**
+
+`/models` is inspection-only for the Typhoon model set. It lists configured and available models with their current resolution state. Unresolved model pins are honestly labeled — they are never shown as available or working when they cannot be resolved. Entries that are catalogued but not yet available are not made invokable.
+
+<Note>
+  `/models` does not implement or invoke any Epic 4 Capability Registry or Specialist service. It reflects the current state of model resolution honestly, including gaps.
+</Note>
+
+---
+
+## `/tools` — capability catalog and diagnostics
+
+**Requires approval:** No  
+**No aliases**
+
+`/tools` exposes the full capability registry: the catalog of built-in tools, their support levels, and their diagnostic state. It supports several sub-actions:
+
+<CardGroup cols={2}>
+  <Card title="browse" icon="list">
+    List all registered capabilities with their current state.
+  </Card>
+  <Card title="search" icon="magnifying-glass">
+    Filter the catalog by name, category, or modality.
+  </Card>
+  <Card title="inspect" icon="eye">
+    Show detailed state for a single capability entry.
+  </Card>
+  <Card title="enable / disable" icon="toggle-on">
+    Enable or disable a capability (registry control, not an Epic 4 invocation).
+  </Card>
+  <Card title="diagnose" icon="stethoscope">
+    Run a diagnostic probe on a capability.
+  </Card>
+  <Card title="retest" icon="rotate">
+    Re-run a previous diagnostic and update the state.
+  </Card>
+</CardGroup>
+
+Each capability entry reports a `CapabilityProjection`:
+
+```typescript
+interface CapabilityProjection {
+  readonly id: string;
+  readonly state: 'working' | 'Catalogued — Not available yet' | 'disabled' | 'unconfigured' | 'unhealthy' | 'quarantined';
+  readonly category: string;
+  readonly modality: string;
+}
+```
+
+Entries with state `'Catalogued — Not available yet'` are displayed but are never made invokable. The catalog is the source of truth; model-supplied capabilities, URLs, or installers are never registry authority.
+
+---
+
+## `/activity` — grouped activity history
+
+**Alias:** `/act`  
+**Requires approval:** No
+
+`/activity` builds the `ActivityProjection` from the durable event journal and displays it grouped by Prompt Round and operation class.
+
+<Accordion title="ActivityRecord fields">
+
+| Field | Type | Description |
+|---|---|---|
+| `sequence` | `number` | Durable sequence number |
+| `eventId` | `string` | Stable event identity |
+| `promptRoundId` | `string \| null` | Prompt Round that produced this record |
+| `operationId` | `string \| null` | Operation that produced this record |
+| `operationClass` | `string` | Class: `prompt`, `effect`, `authority`, `boundary`, `evidence`, `remote`, `health`, `capability`, `context` |
+| `status` | `string` | Canonical UX state token |
+| `safeSummary` | `string` | Secret-free plain summary |
+| `authorityRevision` | `number \| null` | Authority revision at the time of this record |
+| `evidenceRef` | `string \| null` | Evidence reference identity |
+| `timestamp` | `string` | ISO-8601 timestamp |
+| `completeness` | `'complete' \| 'corrupt' \| 'unavailable' \| 'not-authoritative'` | Record completeness |
+
+</Accordion>
+
+Activity includes **every** proposed or executed call — including auto-permitted list, read, and search operations. The journal replay deduplicates by `eventId` so no call or terminal outcome appears twice. Corrupt or incomplete records are labeled with their completeness state and a recovery action; the history never claims to be complete when it is not.
+
+The `ActivityProjection` also carries:
+- `truncatedCount` — number of older records beyond the display cap
+- `corruptCount` — number of corrupt or unavailable records
+- `complete` — `true` only when both counts are zero
+
+---
+
+## `/context` — Active Model Context inspection
+
+**Alias:** `/ctx`  
+**Requires approval:** No
+
+`/context` inspects the bounded Active Model Context — what is currently included in the model's context window, how much capacity is used, and what has been omitted.
+
+<Accordion title="ContextProjection fields">
+
+| Field | Type | Description |
+|---|---|---|
+| `estimatedTokens` | `number` | Estimated total tokens in the current context |
+| `effectiveCapacity` | `number \| 'percentage unavailable'` | Effective context capacity after reserves |
+| `utilizationPercent` | `number \| 'percentage unavailable'` | Utilization as a percentage, or the canonical unavailable token |
+| `pinnedTurnCount` | `number` | Number of pinned turns |
+| `contributors` | `ContextContributorProjection[]` | Per-item contributor list (optional, may be omitted) |
+| `omissions` | `{ itemId, reason }[]` | Items omitted from context with reason |
+| `manifestId` | `string \| null` | Context manifest identity |
+| `measurement` | `string` | Measurement quality token |
+
+</Accordion>
+
+Each contributor entry includes its `role`, `inclusion` mode, `provenance`, `trust` classification, estimated token count, and measured byte count. Items that were omitted due to capacity, trust policy, or duplication appear in the `omissions` list with their reason.
+
+The utilization band thresholds are:
+
+| Band | Threshold |
+|---|---|
+| `green` | Below 70% |
+| `amber` | 70–84% |
+| `orange` | 85–94% |
+| `red` | 95%+ |
+| `percentage unavailable` | No real budget configured |
+
+---
+
+## `/usage` — cumulative provider usage
+
+**Requires approval:** No  
+**No aliases**
+
+`/usage` renders the `UsageProjection` — the cumulative token and call counts across all provider interactions in the current session.
+
+<Accordion title="UsageProjection fields">
+
+| Field | Type | Description |
+|---|---|---|
+| `inputTokens` | `number` | Total input tokens consumed |
+| `outputTokens` | `number` | Total output tokens produced |
+| `cachedInputTokens` | `number` | Subset of input tokens served from cache |
+| `calls` | `number` | Total provider call count |
+| `measurement` | `string` | Measurement source: `provider-reported`, `locally-measured`, `estimated`, `fallback`, `unknown`, or `mixed` |
+| `observations` | `UsageObservation[]` | Per-operation observations with `operationId`, `modelId`, `source`, and `observedAt` |
+
+</Accordion>
+
+Each `UsageObservation` has a `requestDigest` that can be used to cross-reference with the durable journal. When observations come from multiple sources, `measurement` is `'mixed'`.
+
+---
+
+## `/check` — dependency preflight
+
+**Requires approval:** No  
+**No aliases**
+
+`/check` re-runs the non-mutating dependency preflight. It probes the environment for required runtimes, compilers, package managers, and documented commands without installing or modifying anything.
+
+Each probe returns a `PrerequisiteProbeResult`:
+
+| Status | Meaning |
+|---|---|
+| `verified` | Prerequisite found and version confirmed |
+| `prerequisite-blocker` | Required dependency missing; platform-specific guidance shown |
+| `probe-failed` | Could not run the probe; result is inconclusive |
+| `incompatible` | Dependency found but version is incompatible |
+
+The overall preflight result is one of `all-verified`, `blocked`, or `unknown`. Guidance for blockers comes only from the maintained probe registry or verified project documentation — no model-supplied URLs or installers are ever used.
+
+<Note>
+  `/check` produces a fresh `evidenceId` per run. Evidence identities are never reused across runs, so each preflight result is independently attributable.
+</Note>
+
+---
+
+## `/mode` — switch Work Mode
+
+**Requires approval:** Yes  
+**No aliases**
+
+`/mode` switches between `plan` and `build` Work Mode. Because this mutates authority, it may require interactive approval. Without a TTY, it fails closed and returns `noTtyCommandBlocked()` — no authority is held in suspension.
+
+```
+/mode plan
+/mode build
+```
+
+Work Mode is an independently addressable authority field. Switching it does not change the permission profile, boundary expansions, or any other authority dimension.
+
+---
+
+## `/boundaries` — Boundary Expansion management
+
+**Alias:** `/boundary`  
+**Requires approval:** Yes
+
+`/boundaries` lists, grants, and revokes Boundary Expansions. Because grant and revoke mutate authority, they require interactive approval. Without a TTY, the command fails closed.
+
+```
+/boundaries list
+/boundaries grant <scope>
+/boundaries revoke <expansionId>
+```
+
+The `activeBoundaryExpansionCount` in the `AuthorityProjection` reflects only non-revoked, non-expired expansions. Revoked or expired expansions are excluded from the count.
+
+<Warning>
+  Granting a Boundary Expansion widens the authority scope for the current activation. The expansion is durable — it persists until explicitly revoked or until it expires. Always review the scope before granting.
+</Warning>

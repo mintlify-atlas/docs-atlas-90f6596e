@@ -1,0 +1,364 @@
+---
+title: "Evidence Caching for Specialist Service Results"
+sidebarTitle: "Evidence Caching"
+description: "thcode caches immutable sealed evidence from AI for Thai service calls. Cached results preserve original consent provenance and avoid redundant service invocations."
+---
+
+When an AI for Thai specialist service returns a result, thcode seals that result into an immutable `SpecialistEvidence` envelope and stores it in an `EvidenceRepository`. The next time the same operation is requested with the same inputs, the cached evidence is returned directly — no outbound transfer occurs, no re-consent is required, and the original consent provenance is preserved intact inside the evidence record. This page explains each layer of the caching pipeline: how evidence is sealed, how cache identity is computed, how hits are resolved, and how entries are invalidated or expired.
+
+## The SpecialistEvidence Envelope
+
+Every specialist invocation — success or failure — produces a `SpecialistEvidence` record. The record is the immutable, deep-frozen output of `sealSpecialistEvidence`.
+
+```typescript
+// From specialists/evidence/types.ts
+export interface SpecialistEvidence {
+  readonly id: string;                      // deterministic: `ev-${sha256(canonical sealed fields)}`
+  readonly schemaVersion: 1;
+  readonly reuseState: 'fresh' | 'reused'; // labeled at the point of return, never at seal time
+  readonly completeness: EvidenceCompleteness;
+  readonly serviceIdentity: {
+    readonly serviceId: string;
+    readonly nameThai: string;
+    readonly nameEnglish: string;
+    readonly contractVersion: string;
+    readonly adapterVersion: string;
+  };
+  readonly configurationGenerationId: string;
+  readonly sourceContentHash: string;       // hash of the source artifact — never raw bytes
+  readonly consentReference: ConsentReference; // secret-free consent provenance
+  readonly fields: Readonly<Record<string, SpecialistFieldValue>>; // sanitized result fields
+  readonly emptyFields: readonly string[];
+  readonly confidence?: number;
+  readonly uncertainty?: string;
+  readonly provenance: { endpoint: string; method: string; status: number; transportVersion: string };
+  readonly timing: { startedAt: string; completedAt: string; elapsedMs: number };
+  readonly normalizedFailure?: SpecialistFailure; // present only when completeness === 'failed'
+  readonly cacheManifestDigest?: string;    // the cache key for this invocation
+  readonly observationTime: string;
+  readonly displayTime: string;
+  readonly sanitizedRawResponseRef: string;
+  readonly evidenceRef?: string;
+}
+```
+
+Evidence records never carry raw payload bytes — only the source content hash, sanitized result fields, hashes, and policy-approved derived data. The `id` field is deterministic: the same sealed content always produces the same `ev-<hex>` identifier.
+
+### Completeness
+
+```typescript
+export type EvidenceCompleteness =
+  | 'complete'               // all fields present, no sanitizer omissions
+  | 'sanitized-with-omissions' // sanitizer redacted one or more field segments
+  | 'failed'                 // invocation failed; normalizedFailure is set
+  | 'incomplete';            // partial result from the service
+```
+
+Completeness is determined at seal time. If any field's text value triggers a sanitizer omission, completeness is downgraded to `'sanitized-with-omissions'`. Failure outcomes are always sealed with `completeness: 'failed'` and `fields: {}`.
+
+## Sealing Evidence
+
+`sealSpecialistEvidence` in `evidence/seal.ts` turns a `SpecialistResult` or `SpecialistFailure` into an immutable `SpecialistEvidence`. The function:
+
+1. Sanitizes all text and structured fields via the sanitizer (`'remote-payload'` content class), tracking omissions.
+2. Determines `completeness` from the omission count.
+3. Computes a deterministic `id` from the SHA-256 of the canonical JSON of all sealed fields (excluding the `id` itself).
+4. Deep-freezes the entire record, including all nested objects and arrays.
+
+```typescript
+// From specialists/evidence/seal.ts
+export function sealSpecialistEvidence(
+  input: SealSpecialistEvidenceInput,
+): SpecialistEvidence
+```
+
+<Steps>
+  <Step title="Sanitize fields">
+    Each `SpecialistFieldValue` of kind `'text'` is passed through `sanitizer.sanitize(value, 'remote-payload')`. Structured fields are sanitized recursively — only string leaves are touched; numbers, booleans, and nulls pass through unchanged.
+  </Step>
+  <Step title="Determine completeness">
+    If any omissions were recorded, `completeness` is set to `'sanitized-with-omissions'`. For failures, it is always `'failed'`.
+  </Step>
+  <Step title="Compute deterministic id">
+    `canonicalJson` serializes all fields in sorted-key order. The SHA-256 of the canonical JSON produces the `ev-<hex>` id. Identical sealed content always produces the same id.
+  </Step>
+  <Step title="Deep freeze">
+    `deepFreeze` recursively calls `Object.freeze` on the evidence record and all nested values. The frozen record cannot be mutated by any caller.
+  </Step>
+</Steps>
+
+<Note>
+  Failure evidence requires explicit `serviceIdentity` and `consentReference` inputs — they are never synthesized from the failure outcome itself. Passing either as `undefined` throws immediately rather than producing an incomplete sealed record.
+</Note>
+
+### Thai Text and UTF-8 Preservation
+
+Text fields are passed to the sanitizer as UTF-8 strings. The sanitizer operates on the decoded string layer; it never re-encodes to ASCII or strips non-ASCII characters. Structured fields preserve their original object shape, with only string leaves sanitized. This means Thai text in `'text'` and `'structured'` fields flows through every sealing, storage, and retrieval step without modification, provided the sanitizer does not redact it as a credential or unsafe active content.
+
+## The SpecialistAdapterResult Contract
+
+`SpecialistResult` is the result that gets sealed into evidence. The adapter produces it; the sealer consumes it:
+
+```typescript
+// From specialists/adapter/types.ts
+export interface SpecialistResult {
+  readonly ok: true;
+  readonly serviceId: string;
+  readonly serviceIdentity: { serviceId; nameThai; nameEnglish; contractVersion; adapterVersion };
+  readonly configurationGenerationId: string;
+  readonly consentReference: ConsentReference;  // preserved into evidence intact
+  readonly sourceContentHash: string;
+  readonly fields: Readonly<Record<string, SpecialistFieldValue>>;
+  readonly emptyFields: readonly string[];
+  readonly confidence?: number;
+  readonly uncertainty?: string;
+  readonly timing: { startedAt; completedAt; elapsedMs };
+  readonly provenance: { endpoint; method; status; transportVersion };
+  readonly sanitizedRawResponseRef: string;
+  readonly evidenceRef?: string;
+  readonly createdAt: string;
+}
+```
+
+`SpecialistFieldValue` is a discriminated union that explicitly represents absent fields rather than omitting them:
+
+```typescript
+export type SpecialistFieldValue =
+  | { kind: 'text';       value: string;                          present: boolean }
+  | { kind: 'number';     value: number | null;                   present: boolean }
+  | { kind: 'boolean';    value: boolean | null;                  present: boolean }
+  | { kind: 'list';       value: readonly string[];               present: boolean }
+  | { kind: 'structured'; value: Readonly<Record<string, unknown>>; present: boolean };
+```
+
+## The EvidenceRepository
+
+`EvidenceRepository` is the storage port. The current implementation is `InMemoryEvidenceRepository`:
+
+```typescript
+// From specialists/evidence/types.ts
+export interface EvidenceRepository {
+  store(evidence: SpecialistEvidence): Promise<void>;
+  load(id: string): Promise<EvidenceLoadResult>;
+  list(): Promise<readonly SpecialistEvidence[]>;
+  has(id: string): Promise<boolean>;
+}
+
+export type EvidenceLoadResult =
+  | { ok: true;  evidence: SpecialistEvidence }
+  | { ok: false; cause: 'not-found' | 'corrupt' };
+```
+
+`store` is idempotent — storing the same `id` overwrites the record with an identical frozen copy. All accessors return the same frozen record. Durable persistence across sessions is a later epic; this port allows it to be swapped in without changing any caller.
+
+## Cache Identity: CacheManifest
+
+Each specialist invocation is uniquely identified by a `CacheManifest`. The manifest binds every input field that could change the service's response into a single SHA-256 digest:
+
+```typescript
+// From specialists/evidence/types.ts
+export interface CacheManifest {
+  readonly manifestVersion: number;
+  readonly serviceId: string;
+  readonly contractVersion: string;
+  readonly verifiedOrigin: string;           // verified endpoint URL
+  readonly semanticInputs: readonly {        // ordered: (mediaType, contentHash) pairs
+    mediaType: string; contentHash: string
+  }[];
+  readonly requestOptions: { timeoutMs: number; maxRetries: number };
+  readonly preprocessing: readonly string[]; // sorted transformation labels
+  readonly mappingVersion: string;
+  readonly schemaVersion: number;
+  readonly effectiveConfigurationId: string;
+  readonly transformationPolicy: TransformationPolicy;
+  readonly sourceIdentity: string;           // canonical path of the primary artifact
+  readonly digest: string;                   // SHA-256 over all bound fields
+}
+```
+
+`buildCacheManifest` in `evidence/cacheManifest.ts` computes the `digest` using `computeCacheManifestDigest`. Hashing uses a fixed field order with null-byte separators between fields, and `semanticInputs` entries are hashed in their declared order (order matters for multi-artifact calls). Any change to any field — a different endpoint, a rotated credential revision, a changed contract version, a different content hash — produces a completely different digest and therefore a cache miss.
+
+```typescript
+// From specialists/evidence/cacheManifest.ts
+export function buildCacheManifest(input: CacheManifestInput): CacheManifest
+export function cacheManifestMatches(a: CacheManifest, bInput: CacheManifestInput): boolean
+```
+
+`cacheManifestMatches` recomputes the candidate digest and compares — no partial matches, no fuzzy equality.
+
+## The CacheIndex
+
+`CacheIndex` is an in-memory index mapping `cacheManifestDigest` → `CacheIndexEntry`. It is the lookup layer between the manifest digest and the stored evidence:
+
+```typescript
+// From specialists/evidence/cacheIndex.ts
+export interface CacheIndexEntry {
+  readonly cacheManifestDigest: string;
+  readonly evidenceId: string;          // foreign key into EvidenceRepository
+  readonly serviceId: string;
+  readonly effectiveConfigurationId: string;
+  readonly contractVersion: string;
+  readonly credentialRevision?: string;
+  readonly sourceContentHash: string;
+  readonly endpoint: string;
+  readonly observationTime: string;
+  readonly expiresAt?: string;          // ISO-8601 TTL boundary
+  readonly retention: RetentionPolicy;
+  readonly state: 'valid' | 'expired' | 'invalidated';
+}
+```
+
+The raw credential key never enters this structure. `credentialRevision` is the opaque revision string — it identifies the credential version without exposing its value.
+
+The `CacheIndex` exposes four operations:
+
+| Method | Description |
+|---|---|
+| `record(digest, evidenceId, opts)` | Add or overwrite an entry. Used after a live invocation produces new evidence. |
+| `lookup(digest)` | Find a `valid` entry by digest. Returns typed miss/expired/invalidated causes. |
+| `markExpired(now)` | Sweep entries whose `expiresAt < now`, marking them `'expired'`. Does not delete. |
+| `invalidate(scope)` | Mark matching entries `'invalidated'` by scope. Returns affected digests. |
+| `invalidateDigest(digest)` | Mark one specific entry invalidated. Used for corrupt-evidence recovery. |
+
+## Cache Lookup Resolution
+
+`resolveCacheHit` in `evidence/cacheLookup.ts` encodes the full gating order for every specialist invocation:
+
+<Steps>
+  <Step title="Force-fresh bypass (if requested)">
+    If `forceFresh: true`, the cache is bypassed entirely. The prior evidence is preserved — the index entry is **not** deleted. An `'available'` health state is required before proceeding to live dispatch; if the service is not available, the result is `cause: 'unavailable'`.
+  </Step>
+  <Step title="Retention sweep">
+    Before looking up, `index.markExpired(now)` runs to transition any TTL-expired entries to `'expired'`. This sweep runs regardless of what the lookup finds.
+  </Step>
+  <Step title="Digest lookup">
+    The cache manifest digest is looked up in the index. A `'miss'` or `'invalidated'` result proceeds to health gating and live adapter dispatch. An `'expired'` result returns `cause: 'expired'` immediately.
+  </Step>
+  <Step title="Evidence load">
+    On a valid index hit, the evidence record is loaded from the `EvidenceRepository`. A `'not-found'` result (orphaned index entry) is treated as a miss. A `'corrupt'` result marks the index entry invalidated via `invalidateDigest` and returns `cause: 'corrupt'`.
+  </Step>
+  <Step title="Cache hit returned">
+    On a successful load, the evidence is returned with `kind: 'reused'`. No transfer occurs. The service's current health state is irrelevant for cache hits — a valid cached result is returned even if the service is currently unavailable or quarantined.
+  </Step>
+</Steps>
+
+```typescript
+export type ResolveCacheHitResult =
+  | { ok: true;  kind: 'reused'; evidence: SpecialistEvidence; entry: CacheIndexEntry }
+  | { ok: true;  kind: 'miss' }
+  | { ok: false; cause: 'expired' | 'corrupt' | 'unavailable' };
+```
+
+<Warning>
+  Cache lookup runs **before** live-health gating. A valid hit is returned even when the specialist service is currently unhealthy or quarantined. Only `forceFresh: true` requires an `'available'` health state, because it intentionally bypasses the cache to make a live call.
+</Warning>
+
+## Cache Behavior Options
+
+<CardGroup cols={3}>
+  <Card title="force-fresh" icon="rotate">
+    Bypasses the cache entirely for a live service call. Prior evidence is preserved in the index. Requires `'available'` health before any transfer.
+  </Card>
+  <Card title="retain (no TTL)" icon="database">
+    A `RetentionPolicy` of `{ kind: 'none' }` means the entry never expires. It can only be removed via explicit invalidation.
+  </Card>
+  <Card title="TTL expiry" icon="clock">
+    A `RetentionPolicy` of `{ kind: 'ttl', ttlMs: number }` sets an `expiresAt` on the index entry. Expired entries are marked during the retention sweep, never deleted.
+  </Card>
+</CardGroup>
+
+## Evidence Retention
+
+`evaluateRetention` in `evidence/retention.ts` evaluates a single cache index entry against the current time:
+
+```typescript
+export type RetentionPolicy =
+  | { kind: 'ttl';  ttlMs: number } // entry expires ttlMs ms after observationTime
+  | { kind: 'none' };               // entry never expires
+
+export function evaluateRetention(entry: CacheIndexEntry, now: string): RetentionEvaluation
+export function applyRetention(index: { markExpired(now: string): readonly string[] }, now: string): readonly string[]
+```
+
+`applyRetention` is a convenience wrapper that calls `index.markExpired(now)` to sweep all entries. Entries that expire are transitioned to `'expired'` state — evidence records are **never deleted** in this implementation (deletion is a later epic). Expired entries remain in the index in `'expired'` state and can be observed via `index.list()`.
+
+## Evidence Invalidation
+
+`invalidateCache` in `evidence/invalidation.ts` marks matching entries as `'invalidated'` via a `CacheInvalidationScope`:
+
+```typescript
+// From specialists/evidence/invalidation.ts
+export type CacheInvalidationScope =
+  | { kind: 'serviceId';                serviceId: string }
+  | { kind: 'effectiveConfigurationId'; id: string }
+  | { kind: 'credentialRevision';       revision: string }
+  | { kind: 'contractVersion';          version: string }
+  | { kind: 'sourceContentHash';        hash: string }
+  | { kind: 'endpoint';                 endpoint: string }
+  | { kind: 'all' };
+```
+
+Each scope kind targets the **smallest proven scope** (AD-18). Invalidating by `serviceId` does not touch evidence for other services. Invalidating by `sourceContentHash` invalidates only entries whose bound source content changed — unrelated entries for the same service with different source files are untouched.
+
+```typescript
+export function invalidateCache(
+  index: { invalidate(scope: CacheInvalidationScope): readonly string[] },
+  scope: CacheInvalidationScope,
+): InvalidationReceipt
+```
+
+`InvalidationReceipt` reports the scope, the number of affected entries, and their digests:
+
+```typescript
+export interface InvalidationReceipt {
+  readonly scope: CacheInvalidationScope;
+  readonly affectedCount: number;
+  readonly affectedDigests: readonly string[];
+}
+```
+
+Common invalidation triggers and their recommended scope:
+
+<Accordion title="Source artifact changed">
+  Use `{ kind: 'sourceContentHash', hash: previousHash }`. Only evidence entries bound to the old content hash are invalidated. Evidence for other files is untouched.
+</Accordion>
+
+<Accordion title="Contract version updated">
+  Use `{ kind: 'contractVersion', version: previousVersion }`. Evidence from the old adapter contract version is invalidated. Evidence from other services or versions is preserved.
+</Accordion>
+
+<Accordion title="Credential rotated">
+  Use `{ kind: 'credentialRevision', revision: previousRevision }`. Evidence bound to the old credential revision is invalidated. This aligns with `isCredentialAuthorityStale` in the consent pipeline, which also detects stale credentials.
+</Accordion>
+
+<Accordion title="Effective configuration changed">
+  Use `{ kind: 'effectiveConfigurationId', id: previousGenerationId }`. Invalidates all evidence from the previous configuration generation for all services.
+</Accordion>
+
+<Accordion title="Corrupt evidence record">
+  `resolveCacheHit` automatically calls `index.invalidateDigest(digest)` when `repo.load` returns `cause: 'corrupt'`. This per-digest invalidation follows the smallest proven scope (AD-18) — only the corrupt entry is dropped; no other entries are affected.
+</Accordion>
+
+## Caching and Consent Interaction
+
+A cache hit does not require re-consent. The `ConsentReference` stored inside the `SpecialistEvidence` record is the provenance of the original consent that authorized the live invocation. When the cached evidence is returned as `reuseState: 'reused'`, the consent reference from that original invocation is carried forward intact:
+
+```
+Live invocation:
+  evaluateTransferConsent → TransferConsent → toConsentReference
+                                              ↓
+  sealSpecialistEvidence ← SpecialistResult.consentReference
+                         ↓
+  EvidenceRepository.store(evidence)          ← evidence.consentReference preserved
+
+Cache hit:
+  resolveCacheHit → EvidenceRepository.load → evidence (frozen, unchanged)
+                                               ↓
+  evidence.consentReference = original consent reference (no re-consent)
+```
+
+The frozen evidence record is returned **as-is** from the repository — it is never re-sealed, never mutated, and never relabeled as `'fresh'`. The `reuseState` projection (`'reused'`) is applied at the call site without modifying the stored record.
+
+<Tip>
+  Because the `ConsentReference` in a cached evidence record points back to the exact consent that authorized the original transfer, audit tooling can always trace a cached result back to the session and prompt round in which the user explicitly approved the data transfer.
+</Tip>

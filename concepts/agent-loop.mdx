@@ -1,0 +1,168 @@
+---
+title: "The thcode Agent Loop Architecture"
+sidebarTitle: "Agent Loop"
+description: "thcode's agent loop runs locally and calls Typhoon for reasoning. Understand how turns are dispatched, tool proposals are authorized, and results are streamed back."
+---
+
+thcode separates intelligence from authority. The reasoning model (Typhoon) runs remotely and proposes actions — but every proposed action is an untrusted suggestion until the local agent loop validates, authorizes, and executes it on your machine. The local loop owns the conversation history, context selection, tool definitions, permission enforcement, and stop conditions. Typhoon is never given direct access to your filesystem, shell, or network.
+
+This architecture is defined in ADR 0001: the CLI owns the outer loop and calls the selected reasoning provider directly. The thcode API handles specialist artifact processing through AI for Thai services. Neither component can execute repository, filesystem, shell, or test tools on your machine — only the local loop can.
+
+## The `AgentLoop` class
+
+`AgentLoop` in `core/agent/loop.ts` is the central orchestrator. It is constructed with an `AgentDeps` bundle that wires up the provider registry, tool registry, credential store, and workspace root.
+
+```typescript
+// From agent/loop.ts
+export interface AgentDeps {
+  readonly providers: ProviderRegistry;
+  readonly tools: ToolRegistry;
+  readonly credentials: CredentialStore;
+  readonly workspaceRoot: string;
+}
+```
+
+The core never renders prompts or reads user input directly — that separation is defined in ADR 0020. UI layers interact with `AgentLoop` only through typed inputs and an `ApprovalCallback`. The core never touches the terminal, filesystem, or network except through its declared dependencies.
+
+## `runTurn()` — the main entry point
+
+Every user message dispatches a single `runTurn()` call:
+
+```typescript
+async runTurn(
+  input: string,
+  state: TurnState,
+  approve: ApprovalCallback = async () => false,
+  onToken?: (delta: string) => void,
+): Promise<TurnResult>
+```
+
+### TurnState
+
+`TurnState` carries the full permission-relevant session context for the turn:
+
+```typescript
+export interface TurnState {
+  readonly mode: WorkMode;          // 'plan' | 'build'
+  readonly profile: PermissionProfile; // 'manual' | 'assisted' | 'full-access'
+  readonly history: readonly NormalizedMessage[];
+  readonly sessionId?: string;
+}
+```
+
+### ApprovalCallback
+
+The `ApprovalCallback` is the only bridge between the agent core and the developer for per-action approval. The UI resolves `true` (approve) or `false` (reject) — the core never renders prompts itself:
+
+```typescript
+export type ApprovalCallback =
+  (tool: string, input: Record<string, unknown>) => Promise<boolean>;
+```
+
+When the policy engine returns `ask` for a tool proposal, `runTurn()` emits an `ask` event and awaits this callback. If the callback returns `false`, the rejection is recorded in the transcript and the loop continues to the next iteration.
+
+### `onToken` streaming callback
+
+Pass an optional `onToken` callback to receive streaming token deltas from the provider as they arrive. This enables the UI to render partial responses in real time without waiting for the full completion.
+
+### TurnResult
+
+`runTurn()` returns a `TurnResult` with the final assistant text, the updated conversation history (including the new turn), and the full sequence of events that occurred:
+
+```typescript
+export interface TurnResult {
+  readonly text: string;
+  readonly history: readonly NormalizedMessage[];
+  readonly events: readonly TurnEvent[];
+}
+```
+
+## TurnEvent — the discriminated union
+
+Every significant event during a turn is recorded as a `TurnEvent`. The events array gives UI layers a complete audit trail of what the agent did, in order.
+
+<Tabs>
+  <Tab title="text">
+    ```typescript
+    { kind: 'text'; text: string }
+    ```
+    Emitted when the provider returns a final text response (no tool call), or when the loop terminates with an explanatory message (provider unavailable, iteration limit reached, context blocked).
+  </Tab>
+  <Tab title="tool-start">
+    ```typescript
+    { kind: 'tool-start'; tool: string }
+    ```
+    Emitted immediately before a tool is executed. Only emitted when execution is about to happen — not for refused, denied, or rejected tools.
+  </Tab>
+  <Tab title="tool-result">
+    ```typescript
+    { kind: 'tool-result'; tool: string; ok: boolean; output: string }
+    ```
+    Emitted after a tool finishes (or fails). `ok` is `false` for Plan-mode refusals, policy denials, developer rejections, and runtime errors. `output` contains the result string fed back into the next iteration.
+  </Tab>
+  <Tab title="ask">
+    ```typescript
+    { kind: 'ask'; tool: string; reason: string }
+    ```
+    Emitted when the policy engine returns `ask`. The UI can use this event to display the pending approval request. The `ApprovalCallback` is awaited after this event is recorded.
+  </Tab>
+</Tabs>
+
+## How a turn executes
+
+The loop runs for at most `MAX_TOOL_ITERATIONS = 8` iterations. Each iteration follows this sequence:
+
+<Steps>
+  <Step title="Build Active Model Context">
+    `DeterministicContextBuilder` assembles the conversation history and new input into a bounded context. If utilization exceeds 70%, `compactContext()` is called. If compaction fails or context capacity is unavailable, the turn terminates with a descriptive `text` event — never a crash.
+  </Step>
+  <Step title="Check provider availability">
+    The credential store is queried for the selected provider's API key. If the provider is unavailable or unconfigured, `runTurn()` returns a clear `"Provider unavailable"` message immediately without entering the iteration loop.
+  </Step>
+  <Step title="Call Typhoon (the reasoning provider)">
+    The finalized request — messages, tool schemas for the active Work Mode, and output token budget — is dispatched to the provider adapter. The tool schemas are filtered by `ToolRegistry.listForMode(mode)` so mutating tools are never offered to the model in Plan mode.
+  </Step>
+  <Step title="Final text or tool-call proposal">
+    If the provider returns a final text result, the turn ends immediately with a `text` event. If the provider proposes a tool call, the loop continues to authorization.
+  </Step>
+  <Step title="Structural Plan-mode enforcement">
+    `ToolRegistry.resolveForMode(toolName, mode)` is called first. If the tool is mutating and mode is `plan`, `PlanModeToolRefusedError` is thrown. The refusal is recorded as a `tool-result` event with `ok: false`, fed back as `[tool refused]`, and the loop continues to the next iteration.
+  </Step>
+  <Step title="Permission engine evaluation">
+    `evaluatePermission()` is called with the tool's `mutating` and `sensitive` attributes and the current `mode`/`profile` state. The result is `allow`, `ask`, or `deny`.
+    - **`deny`**: recorded as a `tool-result` with `ok: false`, fed back, loop continues.
+    - **`ask`**: `ask` event emitted, `ApprovalCallback` awaited. If rejected, recorded and loop continues. If approved, execution proceeds.
+    - **`allow`**: execution proceeds immediately.
+  </Step>
+  <Step title="Tool execution">
+    The tool's `execute()` method is called with the input and workspace context. Success or failure is recorded as a `tool-result` event. The output is fed back into `pendingInput` for the next iteration.
+  </Step>
+  <Step title="Iteration limit">
+    If `MAX_TOOL_ITERATIONS` (8) iterations complete without a final answer from the provider, the turn terminates with a `text` event explaining the stop.
+  </Step>
+</Steps>
+
+## Conversation history is immutable
+
+The `transcript` inside `runTurn()` is rebuilt immutably at each step — no in-place mutation. The `state.history` passed in is never modified. The `TurnResult.history` returned is a new array that includes the new turn, ready to be passed as `state.history` on the next call.
+
+## Provider error handling
+
+Provider network errors are classified by the adapter's `classifyError()` method and surfaced as a structured `text` event. The loop never crashes on a provider error — it returns a descriptive message that includes the error kind and whether the error is retryable.
+
+```typescript
+// From agent/loop.ts
+const text = `Provider "${providerId}" error (${meta.kind}${
+  meta.retryable ? ', retryable' : ''
+}): ${(err as Error).message}`;
+events.push({ kind: 'text', text });
+return { text, history: [...], events };
+```
+
+## The `CoreApp` facade
+
+UI layers never interact with `AgentLoop` directly for filesystem, network, or shell access. The `CoreApp` facade is the sanctioned surface — UI components dispatch typed intents and receive typed results. This means that any terminal UI, IDE extension, or headless test harness can drive the same agent core without re-implementing permission logic, containment checks, or provider dispatch.
+
+<Note>
+  The `EffectExecutor.authorize()` method in `permissions/pep.ts` is the only sanctioned local effect-authorization surface. Concrete tool adapters never evaluate the PEP themselves or branch on `outcome === 'allow'` to invoke effects directly — they always go through the executor.
+</Note>

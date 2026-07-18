@@ -1,0 +1,98 @@
+---
+title: "thcode: Thai-First Agentic Coding CLI"
+sidebarTitle: "Introduction"
+description: "thcode is a Thai-first terminal coding agent. Learn how its local agent loop, work modes, permission profiles, and AI for Thai catalog fit together."
+---
+
+thcode is a Thai-first terminal coding agent that explores how Thai language models can support practical, multi-step software engineering workflows. It goes beyond conversation — it can inspect a workspace, formulate a plan, and carry out guarded coding tasks under explicit developer approval. The initial provider integration is [Typhoon](https://opentyphoon.ai/), with the architecture designed to accommodate additional Thai reasoning services as they mature.
+
+## Agent Loop Architecture
+
+thcode separates two concerns that other coding agents often blend together: **local execution** (reading files, applying patches, running tests) and **remote reasoning** (choosing what to do next). The local agent loop runs on your machine, manages permissions, enforces workspace boundaries, and coordinates tools. Remote reasoning is handled by the configured provider — Typhoon in the current release — over its OpenAI-compatible API endpoint.
+
+The provider registry includes placeholder adapters for Pathumma, OpenThaiGPT, and ThaLLE; those adapters do not yet have configured endpoints. A configured key alone does not mean a provider is ready: thcode performs explicit health checks on startup and fails closed when configuration, consent, or authority is missing.
+
+<Note>
+  The interactive terminal UI is built with React and [Ink](https://github.com/vadimdemedes/ink). The headless agent core — provider adapters, the agent loop, Work Mode enforcement, Permission Profiles, context construction, and session persistence — is kept entirely independent of Ink so future desktop, web, or IDE clients can reuse it.
+</Note>
+
+## Work Modes
+
+Every session operates in exactly one work mode at a time.
+
+<CardGroup cols={2}>
+  <Card title="Plan Mode" icon="eye">
+    Read-only. thcode can inspect your workspace, search files, and describe proposed changes — but it cannot apply patches, run shell commands, or mutate state. Use Plan when you want to understand a codebase or draft an approach safely.
+  </Card>
+  <Card title="Build Mode" icon="hammer">
+    Mutating. thcode can apply file changes, execute shell commands, and run tests within the boundaries set by the active Permission Profile. New sessions always start in Build mode. Switch modes at any time with `Shift+Tab`, `/plan`, or `/build`.
+  </Card>
+</CardGroup>
+
+## Permission Profiles
+
+Permission profiles determine how much autonomy thcode has when executing actions in Build mode. New sessions always start with the **Manual** profile.
+
+| Profile | Behavior |
+|---|---|
+| **Manual** | Every file write, shell command, and deletion requires explicit approval before execution. |
+| **Assisted** | Low-risk operations (reads, non-destructive writes within the workspace) proceed automatically; destructive or high-risk operations still require approval. |
+| **Full Access** | thcode proceeds without per-effect prompts, within workspace containment rules. Use only in trusted, isolated environments. |
+
+Inspect or change the active profile at any time with the `/permissions` command inside an interactive session.
+
+## AI for Thai Catalog
+
+thcode ships a discoverable catalog of specialist Thai-language AI services. The catalog makes these services inspectable — you can see what is available, its capability, and its status — before committing to any invocation. Specialist use requires a separately configured AI for Thai credential, an available health state, and explicit transfer consent.
+
+| Service | Capability | Status |
+|---|---|---|
+| T-OCR | Recognize Thai text in images | Catalogued |
+| Speech-to-Text | Transcribe Thai audio | Catalogued |
+| Extract Address | Parse Thai free-text addresses | Catalogued |
+| Named Entity Recognition | Identify people, places, and organizations | Catalogued |
+
+<Warning>
+  "Catalogued" means a service is known and inspectable by thcode. It is not a guarantee that every service is configured, entitled, or ready for live invocation in your environment.
+</Warning>
+
+## Project Layout
+
+The repository contains three sub-projects at different stages of maturity.
+
+```text
+.
+├── cli/          # Supported TypeScript + Ink terminal application
+│   ├── src/core/ # Headless agent, policy, provider, storage, and tool core
+│   ├── src/ui/   # React/Ink terminal interface
+│   ├── test/     # Offline Vitest suite
+│   └── catalog-manifest.json
+├── client/       # Early-stage Next.js web scaffold (not part of CLI release)
+├── server/       # Early-stage Express/Prisma API scaffold (not part of CLI release)
+└── docs/         # Architecture decisions and discovery material
+```
+
+`cli/` is the only supported release path. `client/` and `server/` are separate early-stage web and API scaffolds that are not part of the CLI release and are not documented here.
+
+## Prototype Status and Scope
+
+thcode is an active prototype. The supported product surface is the Windows-first CLI. The controlled agent loop, provider registry, permission policy engine, workspace protections, local inspection and mutation pathways, specialist-service architecture, session and context governance, and rollback foundations are all present — but some capabilities remain intentionally conditional on credentials and service availability. The interactive experience continues to evolve.
+
+The Windows-first scope is a deliberate decision (ADR 0008): building cross-platform credential stores, shell adapters, path handling, and terminal behavior in parallel would increase risk during the prototype phase. macOS and Linux are planned in that order after the Windows baseline is proven.
+
+## Where to Go Next
+
+<CardGroup cols={2}>
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Build the CLI, pass the preflight check, configure your Typhoon key, and run your first Thai coding task.
+  </Card>
+  <Card title="Work Modes" icon="toggle-left" href="/concepts/work-modes">
+    Understand the difference between Plan and Build, when to use each, and how mode switching affects the agent's capabilities.
+  </Card>
+  <Card title="Permission Profiles" icon="shield" href="/concepts/permission-profiles">
+    Explore Manual, Assisted, and Full Access profiles and how per-effect authorization protects your workspace.
+  </Card>
+  <Card title="AI for Thai Overview" icon="sparkles" href="/aiforthai/overview">
+    Browse the catalogued Thai specialist services — OCR, speech-to-text, address extraction, and NER.
+  </Card>
+</CardGroup>

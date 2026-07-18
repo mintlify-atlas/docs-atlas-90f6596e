@@ -1,0 +1,127 @@
+---
+title: "T-OCR: Thai Text Recognition from Images"
+sidebarTitle: "T-OCR"
+description: "T-OCR detects and recognizes Thai text in images via the AI for Thai OCR endpoint. Currently catalogued in thcode — discoverable and inspectable, integration pending."
+---
+
+T-OCR is the vision-category specialist service in thcode's AI for Thai catalog. It detects and recognizes Thai text present in an image and returns the recognized text as a string alongside a confidence score and a list of individual words. In the broader thcode workflow, T-OCR results feed directly into the Typhoon reasoning model — after the OCR endpoint produces Thai text, Typhoon can interpret, translate, classify, or incorporate that text into a coding task, bridging the gap between image-embedded Thai content and code.
+
+<Note>
+  T-OCR is **catalogued** in this release. That means it is discoverable and fully inspectable via `/tools`, but the endpoint mapping, live transport, and contract test are a subsequent integration phase. Invoking T-OCR now returns a stub refusal: `"Catalogued — Not available yet"`.
+</Note>
+
+## Service Identity
+
+| Field           | Value                                      |
+| --------------- | ------------------------------------------ |
+| Service ID      | `t-ocr`                                    |
+| Upstream name   | `T-OCR`                                    |
+| Thai name       | `ที-โอซีอาร์`                              |
+| Category        | `vision`                                   |
+| Modality        | `image`                                    |
+| Endpoint        | `https://api.aiforthai.in.th/ocr`          |
+| Support level   | `catalogued`                               |
+| Contract ver.   | `1.0.0`                                    |
+| Adapter ver.    | `1.0.0`                                    |
+
+## Search Terms
+
+The router matches T-OCR against the following terms. You can use any of them in the `/tools search` command:
+
+```
+ocr   อ่านตัวอักษร   text recognition   vision
+```
+
+## Handler: Input Contract
+
+The `TocrSpecialistHandler` builds a transport request from a **binary image artifact**. The handler reads the first prepared artifact, validates that it carries bytes (`contentKind: 'bytes'`), base64-encodes the image data, and assembles the JSON request body.
+
+```json title="Request body sent to the OCR endpoint"
+{
+  "image": "<base64-encoded image bytes>",
+  "mime": "<artifact media type, e.g. image/png>"
+}
+```
+
+The request is dispatched as an authenticated `POST` to `https://api.aiforthai.in.th/ocr` with:
+
+- `Authorization: Bearer <key>` — the raw API key is resolved in scope only and never appears in Evidence, logs, or the secret-free `headersSummary` (which shows `[redacted]`).
+- `Content-Type: application/json`
+
+If the artifact is absent, empty, or not of kind `bytes`, the handler throws before a transport call is made.
+
+## Handler: Output Contract
+
+The `TocrSpecialistHandler` maps the upstream JSON response into three typed `SpecialistFieldValue` fields:
+
+<Tabs>
+  <Tab title="recognizedText">
+    **Kind:** `text`
+
+    Mapped from the `result` key in the upstream response. Present when `result` is a non-empty string. Empty string and `null` are both treated as not-present and the field is listed in `emptyFields`.
+
+    ```json
+    { "kind": "text", "value": "สวัสดีชาวโลก", "present": true }
+    ```
+  </Tab>
+  <Tab title="confidence">
+    **Kind:** `number`
+
+    Mapped from the `confidence` key. Present when the value is a non-null `number`. Propagated to the top-level `SpecialistResult.confidence` field when present.
+
+    ```json
+    { "kind": "number", "value": 0.95, "present": true }
+    ```
+  </Tab>
+  <Tab title="words">
+    **Kind:** `list`
+
+    Mapped from the `words` array. Only string elements are kept; non-string elements are dropped. Present when at least one string element survives the filter.
+
+    ```json
+    { "kind": "list", "value": ["สวัสดี", "ชาวโลก"], "present": true }
+    ```
+  </Tab>
+</Tabs>
+
+Any key that is absent, `null`, or of the wrong type produces `present: false` and is appended to `emptyFields`. The handler never invents fields that were not in the upstream response.
+
+## Fixture
+
+The handler ships with a deterministic, built-in (non-user) fixture used for health probes. The fixture is a minimal valid 1×1 red PNG (70 bytes), and the health canary verifies the endpoint accepts it and returns a valid JSON object. The fixture's expected outputs are:
+
+```typescript
+EXPECTED_TEXT       = 'สวัสดีชาวโลก'
+EXPECTED_CONFIDENCE = 0.95
+EXPECTED_WORDS      = ['สวัสดี', 'ชาวโลก']
+```
+
+The canary uses `image/png` as the media type; any other media type is rejected before the probe is dispatched.
+
+## What Typhoon Does with T-OCR Results
+
+Once T-OCR returns recognized Thai text, Typhoon receives the `recognizedText` field as the primary output. From there the reasoning model can:
+
+- **Translate** the text into English for an international developer.
+- **Use the text as input** to a subsequent specialist service (for example, pipe it into Named Entity Recognition).
+- **Incorporate the text into code** — variable names, comments, string constants, or documentation derived from an image.
+- **Describe or summarize** the visual content of a scanned document relevant to a coding task.
+
+## Using `/tools` with T-OCR
+
+```bash title="Inspect the T-OCR catalog entry"
+/tools inspect t-ocr
+```
+
+```bash title="Search for vision services"
+/tools search vision
+/tools search อ่านตัวอักษร
+```
+
+<Warning>
+  The inspect output will show `invokable: false` with reason `"Catalogued — Not available yet"`. Attempting to invoke T-OCR before integration is complete will produce a pre-transport refusal — no network call is made.
+</Warning>
+
+## Phase 1 Role
+
+T-OCR is part of both the **Verification Quartet** and the **Demo Portfolio**. In Phase 1, it must pass a live contract test and a complete Typhoon-driven coding scenario before it is considered demo-certified. See ADR 0011 for the full Phase 1 roadmap.

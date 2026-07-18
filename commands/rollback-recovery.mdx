@@ -1,0 +1,275 @@
+---
+title: "Rollback and Recovery: Checkpoint Commands"
+sidebarTitle: "Rollback & Recovery"
+description: "Use /rollback to inspect checkpoints and /recover to reconcile interrupted operations. Rollback covers only built-in file effects — shell and remote effects are never reversible."
+---
+
+thcode's checkpoint system creates durable snapshots before built-in file mutations. The `/rollback` command lets you discover and preview those checkpoints; `/recover` helps you reconcile operations that were interrupted before they reached a terminal outcome. Both commands are read-safe: inspecting a checkpoint does not stage or apply anything.
+
+<Warning>
+  **Rollback honesty principle (AD-19):** Automatic rollback covers **only** checkpointed built-in `create_file`, `edit_file`, and `delete_file` effects. Shell commands, process invocations, remote API calls, permission changes, symlink side-effects, and external effects are **never** claimed reversible. A checkpoint summary never implies that the whole Prompt Round is reversible — only the specifically covered file targets can be rolled back.
+</Warning>
+
+---
+
+## `/rollback` — checkpoint discovery and preview
+
+**Alias:** `/rb`  
+**Requires approval:** No
+
+`/rollback` lists eligible rollback checkpoints for the current session and lets you inspect individual checkpoints before any rollback is staged or applied. Listing and inspecting are always read-only.
+
+### Listing checkpoints
+
+`listCheckpoints` returns a `ListCheckpointsResult`:
+
+```typescript
+type ListCheckpointsResult =
+  | { readonly ok: true; readonly checkpoints: readonly CheckpointSummary[] }
+  | { readonly ok: false; readonly failure: RollbackFailure };
+```
+
+Checkpoints are sorted most-recent-first. By default, only `apply-eligible` checkpoints are shown. Pass `--include-hidden` to also see expired, corrupt, and locked checkpoints as non-authoritative recovery records.
+
+### `DiscoverOptions`
+
+| Option | Default | Description |
+|---|---|---|
+| `maxCheckpoints` | `50` | Maximum number of checkpoints to return |
+| `includeHidden` | `false` | Include hidden (expired, corrupt, locked) checkpoints |
+
+### `CheckpointSummary` fields
+
+<Accordion title="Full CheckpointSummary field list">
+
+| Field | Type | Description |
+|---|---|---|
+| `promptRoundId` | `PromptRoundId` | The Prompt Round that created this checkpoint |
+| `checkpointId` | `CheckpointId` | Stable checkpoint identity |
+| `createdAt` | `string` | ISO-8601 creation timestamp |
+| `observedAt` | `string` | ISO-8601 observation timestamp |
+| `subsequentPromptAgeMs` | `number` | Age in milliseconds since creation |
+| `targetCount` | `number` | Number of file targets covered |
+| `preDigests` | `string[]` | Pre-image SHA-256 digests per target |
+| `postDigests` | `string[]` | Post-image SHA-256 digests per target |
+| `renameInfo` | `RenameInfoEntry[]` | Rename/alias information for targets |
+| `retentionExpiry` | `string \| null` | Retention expiry timestamp, or `null` for indefinite |
+| `perCheckpointUsageBytes` | `number` | Storage used by this checkpoint |
+| `storeUsageBytes` | `number` | Total checkpoint store usage |
+| `encryptionState` | `'encrypted' \| 'unencrypted'` | Whether checkpoint artifacts are encrypted |
+| `integrityState` | `IntegrityState` | Integrity verification state |
+| `coverage` | `RollbackCoverage` | Coverage classification |
+| `excludedEffects` | `ExcludedEffects` | Effects explicitly excluded from rollback (AD-19) |
+
+</Accordion>
+
+### Coverage states
+
+| Coverage | Meaning | Eligible for apply |
+|---|---|:---:|
+| `fully protected` | All targets have complete pre/post-image artifacts | ✅ |
+| `partially protected` | Some targets covered, some not | ✅ |
+| `unprotected` | Checkpoint exists but no target artifacts | ✅ |
+| `expired` | Retention has evicted this checkpoint | Hidden |
+| `corrupt` | Integrity verification failed — data may be altered | Non-authoritative |
+| `locked` | Recovery-locked — cannot be used for rollback | Non-authoritative |
+
+<Note>
+  `apply-eligible` includes `fully protected`, `partially protected`, and `unprotected` — the coverage level affects how much can be reversed, but all three allow a rollback attempt. `expired`, `corrupt`, and `locked` checkpoints are hidden from the default listing but remain inspectable.
+</Note>
+
+### `RollbackEligibility`
+
+Every checkpoint is classified into one of three eligibility kinds:
+
+```typescript
+type RollbackEligibility =
+  | { readonly kind: 'apply-eligible' }
+  | { readonly kind: 'hidden'; readonly reason: string }
+  | { readonly kind: 'non-authoritative-recovery-record'; readonly reason: string };
+```
+
+| Kind | When | Available actions |
+|---|---|---|
+| `apply-eligible` | Coverage is `fully protected`, `partially protected`, or `unprotected` | Inspect + apply (apply is a separate staged step) |
+| `hidden` | Checkpoint has expired (retention evicted) | Inspectable via `--include-hidden` only |
+| `non-authoritative-recovery-record` | Integrity is corrupt or recovery-locked | Safe evidence review, recovery, and exit only — no rollback apply |
+
+### Inspecting a checkpoint — `RollbackPreview`
+
+`inspectCheckpoint` returns a `RollbackPreview` in canonical field order. No changes are staged or applied.
+
+<Accordion title="RollbackPreview fields">
+
+| Field | Description |
+|---|---|
+| `heading` | Canonical heading, e.g. `"ROLLBACK INSPECT"` |
+| `purpose` | Purpose of this preview |
+| `risk` | Risk disclosure including excluded effects count and the AD-19 honesty statement |
+| `target` | Checkpoint and Prompt Round identity |
+| `authority` | Coverage, integrity state, and encryption state |
+| `evidenceCompleteness` | Completeness statement (count of targets and bytes, or the corrupt/locked/expired label) |
+| `outcome` | Whether the checkpoint is apply-eligible, hidden, or a non-authoritative record |
+| `nextStep` | Available next actions |
+| `rollbackTokens` | Exact command tokens to proceed (e.g. `rollback apply <id>`) |
+| `summary` | Full `CheckpointSummary` |
+| `eligibility` | Full `RollbackEligibility` |
+
+</Accordion>
+
+---
+
+## Excluded effects and the honesty principle
+
+Every `CheckpointSummary` carries an `ExcludedEffects` structure. These are effects that occurred during the Prompt Round but are **never** claimed reversible by the rollback system.
+
+```typescript
+interface ExcludedEffects {
+  readonly shell: readonly ExcludedEffectEntry[];
+  readonly remote: readonly ExcludedEffectEntry[];
+  readonly permission: readonly ExcludedEffectEntry[];
+  readonly process: readonly ExcludedEffectEntry[];
+  readonly symlinkSide: readonly ExcludedEffectEntry[];
+  readonly external: readonly ExcludedEffectEntry[];
+  readonly unknown: readonly ExcludedEffectEntry[];
+}
+```
+
+Each `ExcludedEffectEntry` has a `target`, `reason`, `reasonCode`, and `status` (`'excluded'` or `'never-protected'`).
+
+<Warning>
+  If the `risk` field in a `RollbackPreview` reports a non-zero `excludedCount`, some effects from that Prompt Round cannot be reversed by any rollback operation. Review the excluded effects list before applying. Rolling back the file targets does not undo shell commands, remote calls, permission grants, process launches, or any external side-effects.
+</Warning>
+
+The risk disclosure in every `RollbackPreview` always includes both sentences:
+
+> Automatic rollback covers checkpointed built-in create/edit/delete ONLY.  
+> Shell, process, remote, permission, symlink-side, and external effects are NEVER claimed reversible.
+
+---
+
+## `/recover` — reconcile interrupted operations
+
+**Alias:** `/rc`  
+**Requires approval:** No
+
+`/recover` addresses operations that were interrupted — by a crash, a cancellation, or a process termination — before they reached a durable terminal outcome. It classifies the operation from the journal and offers only safe actions. It **never** replays a native effect automatically.
+
+### Recovery actions
+
+| Action | Description |
+|---|---|
+| `inspect` | Classify the operation from journal evidence and show its recovery state |
+| `reconcile` | Attempt to clean up incomplete checkpoint stages and resolve the operation state |
+| `export-safe-evidence` | Export a sanitized evidence bundle for the operation (no raw bytes, no secrets) |
+| `exit` | Acknowledge the classification and exit without further action |
+
+### `RecoveryClassification`
+
+`classify(input)` reads the durable event journal and returns a `RecoveryClassification`:
+
+```typescript
+interface RecoveryClassification {
+  readonly operationId: OperationId;
+  readonly journalState: OperationRecoveryState;
+  readonly operationState: OperationState;
+  readonly checkpointMaterial: CheckpointMaterialState;
+  readonly residualRisk: ResidualRisk;
+  readonly dispatchClassification: DispatchClassification;
+  readonly hasEffectDispatchCommitted: boolean;
+  readonly hasTerminalEvent: boolean;
+  readonly terminalKind: string | null;
+}
+```
+
+### `OperationRecoveryState`
+
+Seven mutually exclusive recovery states derived from the journal:
+
+| State | Condition | Residual risk |
+|---|---|---|
+| `not-sent` | No lifecycle-fact or terminal events for this operation | None |
+| `prepared` | Proposal/preparation events exist but no dispatch commit | Low — checkpoint material may be incomplete |
+| `dispatch-committed` | `EffectDispatchCommitted` event exists but no terminal event | **High** — native mutation may have committed |
+| `succeeded` | `OperationSucceeded` event exists | None |
+| `failed` | `OperationFailed` event exists | None |
+| `cancelled` | `OperationCancelled` (or `OperationBlocked`) event exists before dispatch commit | None |
+| `unknown-outcome` | `OperationUnknownOutcome` event or no terminal proof | **High** — native mutation may have committed |
+
+<Warning>
+  Operations in `dispatch-committed` or `unknown-outcome` state carry **high** residual risk. The native mutation may have already committed on disk or on a remote. `/recover` will only offer `inspect`, `reconcile`, `export-safe-evidence`, and `exit`. Blind retry is always blocked for these states.
+</Warning>
+
+### Checkpoint material states
+
+| State | Meaning |
+|---|---|
+| `complete` | Checkpoint record is staged and integrity-verified |
+| `incomplete` | Checkpoint is staging or staged but not committed |
+| `unreachable` | Checkpoint record exists but the stage is unreachable |
+| `corrupt` | Integrity or recovery-lock failure |
+| `recovery-locked` | Stage is locked — cannot be reconciled automatically |
+| `not-applicable` | No checkpoint record exists for this operation |
+
+### Dispatch classification
+
+The `dispatchClassification` field records the most advanced dispatch phase reached:
+
+| Classification | Condition |
+|---|---|
+| `not-dispatched` | No lifecycle or terminal events |
+| `pre-dispatch-commit` | Pre-dispatch events only (proposal/preparation) |
+| `post-dispatch-commit` | `EffectDispatchCommitted` exists, no terminal |
+| `native-mutation-committed` | Native mutation was committed per journal |
+| `reference-publication-failed` | Mutation committed but reference publication failed |
+| `terminal-evidence-recorded` | Terminal event exists in journal |
+
+### `RecoveryResult` output structure
+
+`/recover` renders its result in canonical order:
+
+```typescript
+interface RecoveryResult {
+  readonly heading: string;
+  readonly purpose: string;
+  readonly state: OperationRecoveryState;
+  readonly residualRisk: ResidualRisk;
+  readonly action: RecoveryAction;
+  readonly nextStep: string;
+  readonly exitClass: ExitClass;
+  readonly exitCode: number;
+  readonly body?: string;
+}
+```
+
+Output parity is maintained across interactive, redirected, linearized, and headless JSON surfaces. No color-only cues are used.
+
+---
+
+## Failure envelopes
+
+Both `/rollback` and `/recover` return typed AD-9 failure envelopes when an operation cannot be completed. Each failure carries a `category`, `retryable` flag, `scope`, human-readable `message`, and machine-readable `causeCode`.
+
+<Tabs>
+  <Tab title="/rollback failures">
+
+| Category | Retryable | Meaning |
+|---|:---:|---|
+| `checkpoint-not-found` | No | The requested checkpoint ID does not exist |
+| `checkpoint-unreadable` | No | The checkpoint record is present but cannot be parsed |
+| `session-not-found` | No | No session record found for the given session ID |
+| `internal-error` | No | Unexpected failure during discovery or inspection |
+
+  </Tab>
+  <Tab title="/recover failures">
+
+| Category | Retryable | Meaning |
+|---|:---:|---|
+| `operation-not-found` | No | No journal events found for the given operation ID |
+| `journal-unavailable` | No | The event journal cannot be accessed |
+| `checkpoint-unavailable` | No | Checkpoint material is not accessible |
+| `reconciliation-failed` | No | Reconcile attempt could not clean up incomplete stages |
+| `export-failed` | No | Evidence export could not be completed |
+
+  </Tab>
+</Tabs>

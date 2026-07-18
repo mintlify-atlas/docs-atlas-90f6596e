@@ -1,0 +1,139 @@
+---
+title: "Install thcode on Windows 11"
+sidebarTitle: "Installation"
+description: "Install thcode from source on Windows 11. Requires Node.js 22+ and PowerShell 7.4+. Build, test, and verify in under five minutes."
+---
+
+thcode is distributed as a global npm package with the bin command `thcode` pointing to `dist/index.js`. Because Node.js is a runtime prerequisite — not merely a build tool — it must be installed before you can run thcode itself. The steps below walk through installing prerequisites, building from source, and verifying the result.
+
+## Prerequisites
+
+| Requirement | Minimum | Recommended baseline |
+|---|---|---|
+| Operating system | Windows 11 | Windows 11 25H2+ |
+| [Node.js](https://nodejs.org/) | 22.x | 24 LTS |
+| [PowerShell](https://learn.microsoft.com/powershell/scripting/install/installing-powershell-on-windows) | 7.4 (`pwsh.exe`) | 7.6 LTS (`pwsh.exe`) |
+| Terminal | Windows Terminal | Windows Terminal |
+
+<Warning>
+  **PowerShell 5.1, Git Bash, and WSL are not supported.** thcode explicitly rejects legacy Windows PowerShell 5.1 rather than silently degrading. If `pwsh.exe` is missing or below version 7.4, the preflight gate will emit a documented WinGet recommendation and exit. Git Bash (MSYS) and WSL are also excluded — they introduce Unix path translation and shell-encoding differences that the prototype does not handle.
+</Warning>
+
+## Why Windows First?
+
+thcode's Windows-first scope (ADR 0008) is a deliberate engineering trade-off. Cross-platform support requires separate adapters for credential stores (DPAPI on Windows, Keychain on macOS, Secret Service on Linux), shell execution semantics, path handling (drive letters, backslashes, case-insensitivity), and terminal behavior. Proving one platform end-to-end before expanding reduces implementation risk. macOS and Linux support are planned in that order after the Windows baseline is stable.
+
+## Build from Source
+
+<Steps>
+  <Step title="Clone the repository and enter the CLI directory">
+    Open Windows Terminal and launch a PowerShell 7 (`pwsh.exe`) session. Navigate to the repository root, then move into the `cli/` subdirectory — this is the only subdirectory with a supported release path.
+
+    ```powershell
+    cd path\to\thcode\cli
+    ```
+  </Step>
+
+  <Step title="Install dependencies">
+    Install all Node.js dependencies declared in `package.json`. This includes runtime dependencies (`ink`, `react`, `better-sqlite3`) and development dependencies (`typescript`, `vitest`).
+
+    ```powershell
+    npm install
+    ```
+  </Step>
+
+  <Step title="Compile TypeScript">
+    Run the TypeScript compiler using the project's `tsconfig.json`. Output lands in `dist/`.
+
+    ```powershell
+    npm run build
+    ```
+
+    Under the hood this runs `tsc -p tsconfig.json`. A clean build produces no errors and emits JavaScript to `dist/`.
+  </Step>
+
+  <Step title="Run the test suite">
+    Confirm the build is correct by running the offline Vitest suite. All tests run without provider credentials or network access.
+
+    ```powershell
+    npm test
+    ```
+
+    <Note>
+      The test suite is fully offline. No Typhoon API key or any other provider credential is required to pass it.
+    </Note>
+  </Step>
+
+  <Step title="Verify the entry point">
+    Confirm the non-interactive entry point is reachable and returns the expected version string.
+
+    ```powershell
+    node dist/index.js --version
+    ```
+
+    Expected output:
+
+    ```text
+    thcode 0.1.0
+    ```
+
+    You can also inspect the full help text:
+
+    ```powershell
+    node dist/index.js --help
+    ```
+
+    Expected output:
+
+    ```text
+    thcode 0.1.0 — Thai-first coding agent CLI (prototype)
+
+    Usage: thcode [options]
+
+    Options:
+      -v, --version   Print version and exit
+      -h, --help      Show this help and exit
+
+    Interactive commands: /plan /build /models /permissions /tools /exit
+    Shift+Tab cycles Plan/Build. New sessions start in Build + Manual.
+
+    Requires Node.js >= 22. Windows-first prototype (ADR 0008).
+    ```
+  </Step>
+</Steps>
+
+## Development Mode (No Build Step)
+
+During active development you can skip the compile step entirely. The `dev` script uses Node.js's experimental TypeScript strip-types support to run `src/index.ts` directly:
+
+```powershell
+npm run dev
+```
+
+<Tip>
+  Use `npm run dev` when you are iterating on the source and want immediate feedback without waiting for a full `tsc` compile. Use `npm run build && npm test` before committing to ensure the compiled output is clean and all tests pass.
+</Tip>
+
+## Global Installation (Optional)
+
+Once the package is built, you can link it globally so the `thcode` command is available anywhere in your PowerShell session:
+
+```powershell
+npm install -g .
+```
+
+After linking, the `thcode` bin command (declared in `package.json` as `"thcode": "dist/index.js"`) becomes available on your `PATH`:
+
+```powershell
+thcode --version
+```
+
+## Continuous Watch Mode
+
+To keep the test suite running as you edit source files:
+
+```powershell
+npm run test:watch
+```
+
+This runs `vitest` in watch mode and re-executes affected tests on every save.

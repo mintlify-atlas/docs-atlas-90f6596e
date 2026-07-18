@@ -1,0 +1,119 @@
+{
+  "projectType": "cli-tool",
+  "projectName": "thcode",
+  "projectDescription": "A Thai-first terminal coding agent powered by Typhoon and the AI for Thai service catalog, featuring a guarded agent loop, permission profiles, workspace containment, rollback checkpoints, and specialist Thai-language services.",
+  "theme": "luma",
+  "primaryColor": "#66bc4b",
+  "lightColor": "#4c9a42",
+  "darkColor": "#da8d0d",
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Get Started",
+            "pages": [
+              "introduction",
+              "installation",
+              "quickstart"
+            ]
+          },
+          {
+            "group": "Core Concepts",
+            "pages": [
+              "concepts/work-modes",
+              "concepts/permission-profiles",
+              "concepts/workspace-containment",
+              "concepts/agent-loop"
+            ]
+          },
+          {
+            "group": "Providers & Credentials",
+            "pages": [
+              "providers/typhoon",
+              "providers/credential-store",
+              "providers/ai-for-thai"
+            ]
+          },
+          {
+            "group": "Command Reference",
+            "pages": [
+              "commands/overview",
+              "commands/inspection",
+              "commands/rollback-recovery"
+            ]
+          },
+          {
+            "group": "Operations",
+            "pages": [
+              "operations/checkpoints-rollback",
+              "operations/session-storage",
+              "operations/security-redaction"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "AI for Thai Services",
+        "groups": [
+          {
+            "group": "Catalog",
+            "pages": [
+              "aiforthai/overview",
+              "aiforthai/t-ocr",
+              "aiforthai/speech-to-text",
+              "aiforthai/extract-address",
+              "aiforthai/named-entity-recognition"
+            ]
+          },
+          {
+            "group": "Integration",
+            "pages": [
+              "aiforthai/consent-transfer",
+              "aiforthai/evidence-caching"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "Thai-first agentic coding loop backed by the Typhoon reasoning provider",
+    "Orthogonal Plan and Build work modes with structural read-only enforcement",
+    "Three permission profiles: Manual, Assisted, and Full Access",
+    "Workspace containment with hard boundaries and non-overridable path enforcement",
+    "Encrypted SQLite session storage with DPAPI-backed OS credential store on Windows",
+    "Checkpoint-based rollback with three-way conflict analysis",
+    "Registry-driven AI for Thai catalog exposing OCR, speech-to-text, address extraction, and NER",
+    "Controlled command grammar with deterministic shell-expansion refusal",
+    "Sanitized tool output and credential redaction before every reasoning turn",
+    "Offline test suite runnable without provider credentials"
+  ],
+  "publicApiSurface": [
+    "thcode (CLI binary)",
+    "--version / --help flags",
+    "/status (alias: /st)",
+    "/permissions (alias: /perm)",
+    "/mode — switch Plan/Build work mode",
+    "/boundaries (alias: /boundary)",
+    "/connections (alias: /conn)",
+    "/activity (alias: /act)",
+    "/models",
+    "/tools",
+    "/check",
+    "/help (alias: /?, /h)",
+    "/rollback (alias: /rb)",
+    "/recover (alias: /rc)",
+    "/context (alias: /ctx)",
+    "/usage",
+    "CoreApp TypeScript facade (headless core)",
+    "ProviderRegistry — register/select/list provider adapters",
+    "COMMAND_GRAMMAR — frozen command specification array",
+    "parseCommand() — validate input against grammar",
+    "completeCommand() — deterministic tab completion",
+    "evaluatePermission() — pure permission policy engine",
+    "AgentLoop.runTurn() — single agent turn with approval callback",
+    "Catalog services: t-ocr, speech-to-text, extract-address, named-entity-recognition"
+  ]
+}

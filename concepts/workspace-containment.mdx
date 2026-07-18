@@ -1,0 +1,151 @@
+---
+title: "Workspace Containment and Hard Boundaries"
+sidebarTitle: "Workspace Containment"
+description: "thcode enforces workspace containment on every file operation. Hard boundaries are non-overridable path restrictions. Containment failures block all local effects."
+---
+
+Every file operation thcode proposes is validated against a declared workspace root before any local effect can be authorized. This is not a best-effort check — containment is enforced on every path, on every turn, regardless of Work Mode or Permission Profile. A containment failure produces a `blocked` outcome that prevents any local effects from being authorized for that operation.
+
+## WorkspaceIdentity
+
+When thcode starts, it calls `establishWorkspaceBinding()` to record a `WorkspaceIdentity` for the session root. This structure captures everything needed to make containment decisions consistently and detect drift between authorization time and effect time.
+
+```typescript
+// From workspace/types.ts
+export interface WorkspaceIdentity {
+  readonly workspaceId: WorkspaceId;       // Stable SHA-256-derived 16-char hex id
+  readonly platform: PlatformIdentity;     // OS, case policy, unicode policy
+  readonly canonicalRoot: string;          // Realpath-resolved absolute root
+  readonly volumeIdentity: VolumeIdentity | null; // dev/ino/fsType, or null if unavailable
+  readonly bindingStatus: WorkspaceBindingStatus; // 'bound' | 'blocked'
+  readonly blockedReason: string | null;   // Human-readable reason when blocked
+}
+```
+
+The `workspaceId` is a deterministic SHA-256 hash of the canonical root path. On case-insensitive platforms (Windows), the path is lowercased before hashing so that identity is not sensitive to incidental casing differences.
+
+### Binding status
+
+`establishWorkspaceBinding()` returns `blocked` when the root is missing, inaccessible, or ambiguous. A `blocked` binding means **no local effects can be authorized** against it — the session can still reason and plan, but tool execution requiring filesystem access will be denied.
+
+```typescript
+// From workspace/identity.ts
+// Root is missing or inaccessible → blocked.
+canonicalRoot = path.resolve(root);
+bindingStatus = 'blocked';
+blockedReason = 'root is missing or inaccessible';
+```
+
+## Platform path normalization
+
+The `WorkspaceIdentity.platform` field carries the case and unicode policy for the platform where thcode is running. These policies are set at binding time and used consistently throughout the session.
+
+| Platform | Case policy        | Unicode policy |
+|---|---|---|
+| Windows  | `case-insensitive` | `nfc`          |
+| macOS    | `case-sensitive`   | `nfd`          |
+| Linux    | `case-sensitive`   | `unknown`      |
+
+Path math for containment checks follows the shape of the canonical root — a POSIX-rooted workspace uses POSIX separators even on a Windows host. The `platformPath.ts` module provides the correct path utilities via `pathFor(platformForRoot(ws.canonicalRoot))`.
+
+## `checkContainment()`
+
+`checkContainment()` in `workspace/containment.ts` validates that a target path is safely contained within the workspace, accounting for symlinks, junctions, mount points, and reparse points. It returns a `ContainmentDecision` with one of four outcomes.
+
+```typescript
+// From workspace/types.ts
+export type ContainmentOutcome =
+  | 'allowed'
+  | 'denied'
+  | 'conflict'
+  | 'enforcement-unverified';
+```
+
+<Accordion title="ContainmentDecision outcomes explained">
+  **`allowed`** — The target is safely within the workspace boundary. `resolvedPath` is the canonical absolute path.
+
+  **`denied`** — The target escapes the workspace boundary, or a symlink / junction / mount point was encountered and not explicitly permitted by the caller's `ContainmentOptions`. `resolvedPath` is `null`.
+
+  **`conflict`** — The target is within the workspace boundary but identity cannot be confirmed unambiguously (e.g., a device boundary was crossed). `resolvedPath` is present.
+
+  **`enforcement-unverified`** — The filesystem probe required to verify containment is unavailable. thcode never claims containment when it cannot prove it — it fails closed. `resolvedPath` is `null`.
+</Accordion>
+
+The check walks every path component from the workspace root to the target, calling `lstat` at each step. If a component cannot be inspected, the result is `enforcement-unverified` rather than optimistically claiming containment.
+
+### Symlink and mount-point handling
+
+By default, `checkContainment()` does **not** follow symlinks, junctions, mount points, or reparse points. Encountering any of these returns `denied` unless the caller's `ContainmentOptions` explicitly enables following that boundary type.
+
+```typescript
+// ContainmentOptions defaults — all false
+readonly followSymlinks?: boolean;      // default false
+readonly followJunctions?: boolean;     // default false
+readonly followMountPoints?: boolean;   // default false
+readonly followReparsePoints?: boolean; // default false
+```
+
+When symlink-following is permitted, the resolved link target is itself checked with `resolveWithinWorkspace` — a symlink that resolves outside the workspace root is still denied.
+
+<Note>
+  A non-existent final target path is **allowed** — this is necessary for `write_file` operations that create new files. Only intermediate path components must exist and be inspectable; the final target may be absent.
+</Note>
+
+## Hard boundaries
+
+Hard boundaries are non-overridable path restrictions that `checkHardBoundary()` in `permissions/boundary.ts` evaluates. Unlike permission policy, `checkHardBoundary()` accepts **no Work Mode or Permission Profile parameter** — by design. A hard boundary `deny` cannot be converted to `allow` by any profile, including `full-access`.
+
+```typescript
+// From permissions/boundary.ts — function signature
+export function checkHardBoundary(input: BoundaryCheckInput): BoundaryDecision
+// Note: no WorkMode or PermissionProfile parameter. This is intentional.
+```
+
+The `BoundaryDecision` has two possible outcomes: `allow` or `deny`. A `deny` is always accompanied by a `HardBoundaryReason`:
+
+| Reason | Trigger |
+|---|---|
+| `workspace-escape` | `candidatePath` resolves outside the workspace root |
+| `unsafe-path` | Path resolution threw an unexpected error |
+| `host-threatening-command` | `commandClass` is `'host-threatening'` |
+| `unallowlisted-network-destination` | `networkDestination` is not in `allowlistedNetworkDestinations` |
+| `ENFORCEMENT UNVERIFIED` | Required platform enforcement capability unavailable or unverified |
+| `quota-exceeded` | `quotaExceeded` flag is true |
+| `wrong-credential-group` | `credentialGroup` does not match `expectedCredentialGroup` |
+
+### BoundaryExpansionRegistry
+
+The `BoundaryExpansionRegistry` maintains durable, independently inspectable and revocable boundary expansions for a Runtime Activation's lifetime. An expansion grants specific action classes access to a specific resource identity within a specific workspace — it is not a blanket override.
+
+```typescript
+// From permissions/boundary.ts
+export interface BoundaryExpansion {
+  readonly expansionId: string;
+  readonly resourceIdentity: string;
+  readonly workspaceId: string;
+  readonly actionClasses: readonly string[];
+  readonly reason: string;
+  readonly createdAt: string;
+  readonly expiresAt: string | null;
+  readonly revoked: boolean;
+  readonly revokedAt: string | null;
+}
+```
+
+<Warning>
+  Revocation is permanent and fail-closed. `registry.revoke()` prevents all future authorization for that expansion but never claims that an already-committed effect was cancelled. Unknown, revoked, or expired expansions always evaluate to `false` — never optimistically `true`.
+</Warning>
+
+## Effect-time revalidation
+
+Authorization is evaluated at proposal time, but thcode also revalidates the boundary decision immediately before effect execution. `revalidateBoundary()` compares the original `BoundarySnapshot` to the current state. Any drift in resource identity, workspace identity, or enforcement availability marks the original decision as `stale`, requiring re-evaluation rather than consuming the stale authorization.
+
+```typescript
+export function revalidateBoundary(
+  original: BoundarySnapshot,
+  current: BoundarySnapshot,
+): RevalidationResult
+// Returns { stale: true, reason: '...' } if anything has changed.
+```
+
+This prevents a time-of-check/time-of-use race where a file or directory is moved or replaced between the authorization decision and the actual write.

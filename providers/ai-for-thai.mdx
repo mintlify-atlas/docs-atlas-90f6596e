@@ -1,0 +1,163 @@
+---
+title: "AI for Thai Credentials and Service Access"
+sidebarTitle: "AI for Thai"
+description: "thcode stores your AI for Thai developer key locally, passing it only to verified aiforthai.in.th endpoints. A key alone does not enable services."
+---
+
+AI for Thai is thcode's specialist-tool layer — a set of Thai-language AI services covering vision, speech, language, and address parsing. The AI for Thai credential is entirely separate from the Typhoon reasoning-provider key: you need one developer API key for reasoning (Typhoon) and a distinct developer API key for AI for Thai services. Both keys are stored locally and neither is ever sent to a hosted thcode proxy.
+
+## Credential Separation
+
+thcode enforces strict isolation between its two Phase-1 credentials:
+
+<CardGroup cols={2}>
+  <Card title="Typhoon key" icon="brain">
+    Required for all reasoning turns. Stored under credential id `"typhoon"`. Sent only to `api.opentyphoon.ai`. Never used for AI for Thai endpoints.
+  </Card>
+  <Card title="AI for Thai key" icon="toolbox">
+    Optional in Phase 1; required once you use any specialist tool. Stored under credential id `"aiforthai"`. Sent only to `api.aiforthai.in.th`. Never used for reasoning.
+  </Card>
+</CardGroup>
+
+The hosted thcode service receives neither key. Provider requests originate directly from your machine.
+
+## Obtaining an AI for Thai Developer Key
+
+AI for Thai developer API keys are available through the official developer registration at [aiforthai.in.th](https://aiforthai.in.th). Register, select the services you want to access, and copy the API key to use during thcode onboarding.
+
+## Specialist Credential Onboarding
+
+The AI for Thai credential is onboarded **just-in-time**: thcode pauses at the first request that requires a specialist tool and walks you through the credential form before the request is dispatched. No specialist tool is ever invoked without a stored, verified credential.
+
+<Steps>
+  <Step title="JIT pause at connection boundary">
+    When a specialist tool is requested and no AI for Thai credential is configured, the onboarding flow starts immediately. The tool invocation is held — nothing is dispatched yet.
+  </Step>
+  <Step title="Disclosure">
+    The CLI prints the complete disclosure before accepting any input:
+
+    ```
+    AI-for-Thai is the shared credential group for four Specialist Services:
+      - T-OCR (Thai Optical Character Recognition)
+      - Speech-to-Text (Thai speech recognition)
+      - Extract Address (Thai address extraction)
+      - Named Entity Recognition (Thai NER)
+
+    Reviewed endpoint: https://api.aiforthai.in.th (called directly from this CLI; no hosted proxy).
+    Your API key is stored in the OS credential facility (Windows Credential Manager / macOS Keychain).
+    The key is never written to .env, project files, SQLite, journal, transcript, or output.
+    The key is shared by all four services and never reaches Typhoon, SCBx, or any hosted component.
+    You can remove or rotate the key at any time.
+    ```
+
+    In headless (non-TTY) mode, the flow returns `headless-blocked` immediately — it never reads from stdin or auto-continues.
+  </Step>
+  <Step title="Masked key input">
+    You paste your AI for Thai API key at a masked, non-echoing prompt. An empty submission cancels onboarding with a `cancelled` result and no credential is written.
+  </Step>
+  <Step title="Write to OS credential store">
+    The key is stored under the single shared credential group id `"aiforthai"` via `store.set('aiforthai', trimmedKey)`. All four launch services share this one credential entry.
+  </Step>
+  <Step title="Endpoint verification">
+    The onboarding flow verifies the target origin — confirming TLS, no redirects accepted, and that the request is bound to `api.aiforthai.in.th`. If verification fails, the stored key is removed immediately and the result is `unavailable`.
+  </Step>
+  <Step title="Secret-free reference stored">
+    Only a secret-free `AiForThaiCredentialReference` is persisted in product storage:
+    ```typescript
+    interface AiForThaiCredentialReference {
+      referenceId: string;         // e.g. "aiforthai-2026-07-12T..."
+      credentialRevision: string;  // changes on rotation
+      fingerprint: string;         // hash of identity + host + revision
+      storedAt: string;            // UTC ISO-8601
+    }
+    ```
+    The raw key value never appears in this record or anywhere in product persistence.
+  </Step>
+  <Step title="Verify connection">
+    Run `/tools inspect <service-id>` to confirm the credential reached `available` state for the specialist service you need.
+  </Step>
+</Steps>
+
+## Specialist Health Lifecycle
+
+A stored AI for Thai credential does not automatically make services available. Each specialist service goes through the same generation-bound health lifecycle as reasoning providers:
+
+<Note>
+A configured key alone is not sufficient to invoke a specialist service. An explicit health check must pass, consent must be given, and the service must have appropriate authority before any call is dispatched.
+</Note>
+
+```
+unconfigured → configured → checking → available
+                                     ↘ unavailable
+                                     ↘ unhealthy
+                                     ↘ quarantined
+```
+
+| State | Meaning |
+|---|---|
+| `unconfigured` | No credential is stored; no configuration generation exists |
+| `configured` | A credential is stored and a generation is registered, but no live check has run yet |
+| `available` | The live probe passed against the current generation |
+| `unavailable` | A transient (retryable) probe failure — connectivity, quota |
+| `unhealthy` | A fatal probe failure — auth rejected, configuration error, or protocol mismatch |
+| `quarantined` | Credential was rejected; locked until an explicit retest passes |
+
+Removing or rotating the credential invalidates the current configuration generation. All dependent services return to `unconfigured` with no cached key value left in any buffer or persistence layer.
+
+## Catalogued Services
+
+The AI for Thai service catalog uses explicit support levels. A service appearing in the catalog does **not** mean it can be called — it means it has been reviewed and listed.
+
+| Support level | What it means |
+|---|---|
+| `catalogued` | Discoverable and inspectable; **not claimed callable** |
+| `integrated` | Adapter and contract implemented |
+| `verified` | Contract tests passed against the live endpoint |
+| `demo-certified` | Verified and cleared for demonstration use |
+
+### Phase-1 Catalogued Services
+
+All four launch services are currently `catalogued`:
+
+<CardGroup cols={2}>
+  <Card title="T-OCR" icon="eye">
+    Thai text detection and recognition from images. Endpoint: `https://api.aiforthai.in.th/ocr`. Modality: image.
+  </Card>
+  <Card title="Speech-to-Text" icon="microphone">
+    Thai automatic speech recognition (audio to text). Endpoint: `https://api.aiforthai.in.th/partii-webapi`. Modality: audio.
+  </Card>
+  <Card title="Extract Address" icon="location-dot">
+    Parse a Thai free-text address into structured components. Endpoint: `https://api.aiforthai.in.th/textmedad`. Modality: text.
+  </Card>
+  <Card title="Named Entity Recognition" icon="tag">
+    Thai NER — people, places, and organizations. Endpoint: `https://api.aiforthai.in.th/thainer`. Modality: text.
+  </Card>
+</CardGroup>
+
+<Note>
+A `catalogued` service is discoverable with `/tools` and inspectable, but it is **not claimed callable**. Until a service reaches `verified` support level, dispatching it may fail in ways that are not covered by thcode's contract tests.
+</Note>
+
+## Credential Security Rules
+
+The same security invariants that apply to the Typhoon key apply to the AI for Thai key, with one additional rule:
+
+<Accordion title="Bound to verified AI for Thai endpoints only">
+  The AI for Thai key is sent exclusively to verified `api.aiforthai.in.th` endpoints. It never reaches Typhoon, SCBx, any hosted thcode component, or any third-party origin. Redirects are not followed — only the exact verified host is accepted.
+</Accordion>
+
+<Accordion title="Never in prompts, transcripts, or tool results">
+  The key never enters a reasoning turn as context. Recognized credential patterns are redacted from tool output before being passed to Typhoon.
+</Accordion>
+
+<Accordion title="Removal and rotation invalidate all dependent generations">
+  When you run `/disconnect aiforthai`, the stored credential is deleted, all dependent configuration generations become stale, and all four specialist services return to `unconfigured`. No cached key value remains anywhere in the product.
+</Accordion>
+
+## Phase 2 Gateway
+
+In Phase 2, once thcode is onboarded as an AI for Thai service, the AI for Thai API key is expected to become the primary platform credential that covers both the thcode service and permitted AI for Thai models and tools. The exact behavior — headers, endpoint routing, quota, and whether the gateway passes or strips the caller key — depends on confirmation from the AI for Thai organizers and is not yet implemented. No Phase 2 gateway behavior is assumed in the current release.
+
+<Tip>
+Use `/tools inspect <service-id>` at any time to see the current health state, generation id, and endpoint for a specific AI for Thai service — without exposing the key value.
+</Tip>

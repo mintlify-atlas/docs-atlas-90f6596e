@@ -1,0 +1,148 @@
+---
+title: "Named Entity Recognition for Thai Text"
+sidebarTitle: "NER"
+description: "Named Entity Recognition identifies people, places, and organizations in Thai text via the AI for Thai NER endpoint. Currently catalogued and in the verification queue."
+---
+
+Named Entity Recognition (NER) is the language-category specialist service in thcode's AI for Thai catalog. It analyzes Thai text — or text mixing Thai and other scripts — and identifies spans that represent named entities such as people, places, and organizations, returning each entity with its label and character offset. This is useful whenever thcode needs to reason about proper nouns embedded in Thai source code comments, documentation strings, user-facing copy, or natural-language task descriptions.
+
+<Note>
+  NER is **catalogued** in this release. It is discoverable and fully inspectable via `/tools`, but the endpoint mapping, live transport, and contract test are a subsequent integration phase. Invoking the service now returns a stub refusal: `"Catalogued — Not available yet"`.
+
+  NER is a member of the **Verification Quartet** — the four services required to pass live contract tests in Phase 1. It is verified coverage, but it is **not** part of the public Demo Portfolio. See ADR 0011 for the distinction.
+</Note>
+
+## Service Identity
+
+| Field           | Value                                              |
+| --------------- | -------------------------------------------------- |
+| Service ID      | `named-entity-recognition`                         |
+| Upstream name   | `Named Entity Recognition`                         |
+| Thai name       | `การรู้จำเอนทิตี`                                   |
+| Category        | `language`                                         |
+| Modality        | `text`                                             |
+| Endpoint        | `https://api.aiforthai.in.th/thainer`              |
+| Support level   | `catalogued`                                       |
+| Contract ver.   | `1.0.0`                                            |
+| Adapter ver.    | `1.0.0`                                            |
+
+## Search Terms
+
+The router matches NER against the following terms. You can use any of them in the `/tools search` command:
+
+```
+ner   entity   แยกชื่อ   language
+```
+
+## Handler: Input Contract
+
+The `NerSpecialistHandler` builds a transport request from a **text artifact**. The handler reads the first prepared artifact, preferring the `text` property and falling back to `extractedText` when `text` is absent. The plain text string is then sent as a JSON body.
+
+```json title="Request body sent to the NER endpoint"
+{
+  "text": "นายสมชาย ใจดี ทำงานที่บริษัท ไทยเทค จำกัด ในกรุงเทพมหานคร"
+}
+```
+
+The request is dispatched as an authenticated `POST` to `https://api.aiforthai.in.th/thainer` with:
+
+- `Authorization: Bearer <key>` — the raw API key is resolved in scope only and never appears in Evidence, logs, or the secret-free `headersSummary` (which shows `[redacted]`).
+- `Content-Type: application/json`
+
+If the artifact is absent or the text is empty, the handler throws before a transport call is made.
+
+## Handler: Output Contract
+
+The `NerSpecialistHandler` maps the upstream JSON response into two typed `SpecialistFieldValue` fields:
+
+<Tabs>
+  <Tab title="entities">
+    **Kind:** `structured`
+
+    Mapped from the `entities` array in the upstream response. Each element must be a non-null, non-array object with both `text: string` **and** `label: string` properties to be kept — elements missing either field are dropped. Valid entities are wrapped verbatim (including the optional `offset` property) in `{ items: [...] }`.
+
+    ```json
+    {
+      "kind": "structured",
+      "value": {
+        "items": [
+          { "text": "สมชาย ใจดี",    "label": "PERSON",       "offset": 3 },
+          { "text": "ไทยเทค จำกัด",   "label": "ORGANIZATION", "offset": 28 },
+          { "text": "กรุงเทพมหานคร",  "label": "LOCATION",     "offset": 47 },
+          { "text": "สมหญิง รักเรียน","label": "PERSON",       "offset": 88 },
+          { "text": "สนามบินสุวรรณภูมิ","label": "LOCATION",   "offset": 107 }
+        ]
+      },
+      "present": true
+    }
+    ```
+
+    The handler never fabricates entities or labels. If the upstream array is empty or contains no valid elements, the field is `present: false` and listed in `emptyFields`.
+  </Tab>
+  <Tab title="confidence">
+    **Kind:** `number`
+
+    Mapped from the `confidence` key. Present when the value is a non-null, finite `number`. Propagated to the top-level `SpecialistResult.confidence` field when present.
+
+    ```json
+    { "kind": "number", "value": 0.92, "present": true }
+    ```
+  </Tab>
+</Tabs>
+
+## Fixture
+
+The handler ships with a deterministic, built-in (non-user) fixture for health probes. The canary uses `text/plain` as the media type and sends the following Thai/mixed-language text containing known names, organizations, and locations:
+
+```
+นายสมชาย ใจดี ทำงานที่บริษัท ไทยเทค จำกัด ในกรุงเทพมหานคร
+เมื่อวันที่ 15 มกราคม 2024 เขาได้พบกับ คุณสมหญิง รักเรียน ที่สนามบินสุวรรณภูมิ
+```
+
+The fixture's expected entities are:
+
+| Text               | Label          | Offset |
+| ------------------ | -------------- | ------:|
+| `สมชาย ใจดี`       | `PERSON`       | 3      |
+| `ไทยเทค จำกัด`     | `ORGANIZATION` | 28     |
+| `กรุงเทพมหานคร`    | `LOCATION`     | 47     |
+| `สมหญิง รักเรียน`  | `PERSON`       | 88     |
+| `สนามบินสุวรรณภูมิ`| `LOCATION`     | 107    |
+
+Expected confidence: `0.92`. Any media type other than `text/plain` is rejected before the probe is dispatched.
+
+## Use Cases
+
+<CardGroup cols={2}>
+  <Card title="Code Comments & Docstrings" icon="comment">
+    Identify Thai proper nouns in inline comments or JSDoc/TSDoc blocks so Typhoon can reference them accurately in generated code or documentation.
+  </Card>
+  <Card title="User-Facing Strings" icon="font">
+    Detect names, places, and organizations in Thai UI copy or localization files, enabling targeted string substitution or validation.
+  </Card>
+  <Card title="Natural-Language Task Descriptions" icon="list-check">
+    Extract entities from a Thai task description before it is passed to the reasoning model, enriching the context with structured provenance.
+  </Card>
+  <Card title="Pipeline Chaining" icon="arrow-right-arrow-left">
+    Feed a Speech-to-Text transcript directly into NER to identify entities in spoken Thai — combining two specialist services in a single task flow.
+  </Card>
+</CardGroup>
+
+## Using `/tools` with NER
+
+```bash title="Inspect the NER catalog entry"
+/tools inspect named-entity-recognition
+```
+
+```bash title="Search for language or entity services"
+/tools search ner
+/tools search แยกชื่อ
+```
+
+<Warning>
+  The inspect output will show `invokable: false` with reason `"Catalogued — Not available yet"`. Attempting to invoke NER before integration is complete will produce a pre-transport refusal — no network call is made.
+</Warning>
+
+## Phase 1 Role
+
+NER is a member of the **Verification Quartet** — the four services required to pass live contract tests before the Phase 1 prototype is considered fully verified. It is verified coverage, but it is not in the public Demo Portfolio: T-OCR, Speech-to-Text, and Extract Address carry the three independent demo scenarios. See ADR 0011 for details on the distinction between verified coverage and demo-certification.

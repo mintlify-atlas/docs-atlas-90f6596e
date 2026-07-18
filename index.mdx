@@ -1,20 +1,66 @@
 ---
-title: "Introduction"
-description: "Welcome to your project"
+title: "thcode: Thai-First Terminal Coding Agent"
+sidebarTitle: "Home"
+description: "thcode is a Thai-first agentic coding CLI powered by Typhoon, with guarded workspace operations, permission profiles, rollback checkpoints, and the AI for Thai service catalog."
 ---
 
-Write a short description of your product here. What it does, who it's for, and what they can accomplish with it.
+thcode is a terminal coding agent built for Thai developers. It combines a controlled local agent loop with the Typhoon reasoning provider, giving you a safe, inspectable way to plan and execute multi-step coding tasks — all from your terminal, in Thai or mixed-language workflows.
 
-<Tip>
-  Ready to make this your own? Start by editing this page. Update your `docs.json` file to customize your site. Then fill out the [Quickstart](/quickstart) page.
-</Tip>
+<CardGroup cols={2}>
+  <Card title="Introduction" icon="book-open" href="/introduction">
+    Learn what thcode is and how its agent loop, work modes, and permission system fit together.
+  </Card>
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Build and run thcode in minutes, configure your Typhoon key, and complete your first coding task.
+  </Card>
+  <Card title="Command Reference" icon="terminal" href="/commands/overview">
+    Every slash command in the frozen grammar — status, permissions, rollback, recover, and more.
+  </Card>
+  <Card title="AI for Thai Services" icon="globe" href="/aiforthai/overview">
+    Discover the registry-driven catalog: OCR, speech-to-text, address extraction, and NER.
+  </Card>
+</CardGroup>
 
-<Card title="Quickstart" icon="rocket" href="/quickstart">
-  This card links to the quickstart page in your project.
-</Card>
-<Card title="Components" icon="puzzle-piece" href="https://mintlify.com/docs/components">
-  Add cards, callouts, steps, tabs, and more to design and structure your pages.
-</Card>
-<Card title="Settings" icon="gear" href="https://mintlify.com/docs/organize/settings">
-  Set your site name, branding, and navigation in the `docs.json` file.
-</Card>
+## Why thcode?
+
+thcode is designed from the ground up for Thai-language software engineering workflows. Rather than adapting a general-purpose coding agent, thcode treats Thai input as a first-class citizen — capturing intent without rewriting user bytes — and routes tasks through Typhoon, the primary Thai-language reasoning provider.
+
+<CardGroup cols={3}>
+  <Card title="Guarded Operations" icon="shield-check">
+    Every file write, deletion, and command execution passes through the Policy Enforcement Point before it runs.
+  </Card>
+  <Card title="Plan Before You Build" icon="clipboard-list">
+    Orthogonal Plan and Build modes keep read-only analysis structurally separate from workspace mutations.
+  </Card>
+  <Card title="Rollback Anytime" icon="rotate-left">
+    Encrypted checkpoints record pre- and post-images of every file change. Three-way conflict analysis tells you exactly what can be safely reversed.
+  </Card>
+</CardGroup>
+
+## Getting started
+
+<Steps>
+  <Step title="Install prerequisites">
+    thcode requires **Node.js 22+** and **PowerShell 7.4+** (`pwsh.exe`) on Windows 11.
+  </Step>
+  <Step title="Build the CLI">
+    ```powershell
+    cd cli
+    npm install
+    npm run build
+    ```
+  </Step>
+  <Step title="Configure your Typhoon key">
+    Start thcode and follow the credential onboarding flow to store your Typhoon API key securely in the Windows Credential Store.
+    ```powershell
+    node dist/index.js
+    ```
+  </Step>
+  <Step title="Start coding in Thai">
+    Type your request in Thai or English. Use `Shift+Tab` to switch between Plan and Build modes, and `/help` to see all available commands.
+  </Step>
+</Steps>
+
+<Note>
+  thcode is a Windows-first prototype. PowerShell 7.4+ (`pwsh.exe`) is required. PowerShell 5.1, Git Bash, and WSL are not supported at this stage.
+</Note>

@@ -1,0 +1,112 @@
+---
+title: "Plan and Build: thcode's Two Work Modes"
+sidebarTitle: "Work Modes"
+description: "thcode's Plan and Build modes are structurally orthogonal. Plan mode enforces read-only at the architecture level — no profile or override can authorize mutations."
+---
+
+thcode operates in one of two Work Modes at all times: **Plan** and **Build**. These modes are not pipeline stages — they are independently selectable dimensions of session state. You can enter either mode directly, switch freely between them mid-session, and the currently active mode is always visible in the terminal UI. Work Mode is orthogonal to [Permission Profile](/concepts/permission-profiles): neither implies the other, and both must be treated as separate UI state.
+
+## What makes Plan mode different
+
+Plan mode enforces a structural read-only boundary. This is not a policy layer that a sufficiently permissive Permission Profile can override — it is a hard architectural rule evaluated before the permission engine runs. Even `full-access` in Plan mode **cannot authorize a mutation**. The `ToolRegistry.resolveForMode()` method refuses to surface mutating tools to the model when mode is `plan`, and `evaluatePermission()` short-circuits to `deny` before reaching any profile logic.
+
+```typescript
+// From permissions/policy.ts
+// 1. Structural read-only boundary of Plan Mode (ADR 0013). Non-negotiable.
+if (state.mode === 'plan' && action.mutating) {
+  return {
+    outcome: 'deny',
+    reason: 'plan-mode-is-read-only',
+  };
+}
+```
+
+The `PlanModeToolRefusedError` is raised at the registry level when the model proposes a mutating tool name while in Plan mode, before the permission engine is ever consulted.
+
+```typescript
+// From tools/registry.ts
+export class PlanModeToolRefusedError extends Error {
+  constructor(tool: string) {
+    super(`Tool "${tool}" is mutating and cannot run in Plan Mode (read-only).`);
+    this.name = 'PlanModeToolRefusedError';
+  }
+}
+```
+
+## Session defaults
+
+Every new interactive session starts in **Build** mode with the **Manual** Permission Profile. This is the `NEW_SESSION_DEFAULT` constant from `permissions/types.ts`:
+
+```typescript
+export const NEW_SESSION_DEFAULT: { mode: WorkMode; profile: PermissionProfile } = {
+  mode: 'build',
+  profile: 'manual',
+};
+```
+
+## Switching modes
+
+<CardGroup cols={2}>
+  <Card title="Keyboard shortcut" icon="keyboard">
+    Press **Shift+Tab** to cycle directly between Plan and Build. Plain Tab is reserved for `/command` and `@file` completion.
+  </Card>
+  <Card title="Slash commands" icon="terminal">
+    Type `/plan` to enter Plan mode or `/build` to enter Build mode explicitly from the command line.
+  </Card>
+</CardGroup>
+
+## What Plan mode can do
+
+Plan mode allows all non-mutating operations. The model can fully analyze a codebase, surface intended changes, and report any preflight issues before a single byte is written.
+
+<Steps>
+  <Step title="Read files">
+    `read_file` is non-mutating and available in Plan mode. The model can read any file within the workspace boundary.
+  </Step>
+  <Step title="List directories">
+    `list_dir` is non-mutating. The model can explore the workspace directory tree freely.
+  </Step>
+  <Step title="Search">
+    `search` is non-mutating. Grep-style content search and file discovery are available.
+  </Step>
+  <Step title="Show a plan">
+    The model can emit a structured summary of intended files, commands, risks, and verification criteria — without executing any of them.
+  </Step>
+  <Step title="Non-mutating dependency preflight">
+    The model can run non-mutating toolchain discovery to check whether required dependencies are present before proposing build steps.
+  </Step>
+</Steps>
+
+## What Plan mode cannot do
+
+Any action whose `mutating` flag is `true` in the Permission Matrix is blocked unconditionally while in Plan mode, regardless of Permission Profile.
+
+<Warning>
+  Plan mode cannot write files, delete files, run commands, or perform transfers. These are mutating action classes and are structurally denied — not just policy-denied. No profile or developer override can change this while Plan mode is active.
+</Warning>
+
+## Action class reference
+
+The Permission Matrix defines a fixed registry of action classes with static attributes. A class absent from this registry is treated as unknown and denied. The table below reflects `PERMISSION_MATRIX_VERSION = 1` from `permissions/matrix.ts`.
+
+| Action Class | Mutating | Sensitive | Risk   | Requires Enforcement Capability | Available in Plan |
+|---|---|---|---|---|---|
+| `read_file`  | No       | No        | low    | —                               | ✅ Yes            |
+| `list_dir`   | No       | No        | low    | —                               | ✅ Yes            |
+| `search`     | No       | No        | low    | —                               | ✅ Yes            |
+| `write_file` | **Yes**  | No        | medium | `filesystem-write`              | ❌ No             |
+| `delete`     | **Yes**  | No        | high   | `filesystem-delete`             | ❌ No             |
+| `run_command`| **Yes**  | No        | high   | `command-exec`                  | ❌ No             |
+| `transfer`   | No       | **Yes**   | high   | `network-transfer`              | ❌ No (sensitive) |
+
+<Note>
+  `transfer` is marked non-mutating but sensitive, and carries a high risk rating. It is blocked in Plan mode not because it is mutating, but because sensitive actions always require approval unless `full-access` holds the explicit `sensitiveOverride` flag — see [Permission Profiles](/concepts/permission-profiles).
+</Note>
+
+## Build mode
+
+Build mode lifts the structural read-only restriction. Mutating tools become available to the model, and whether any particular mutating action executes automatically or asks for approval is governed entirely by the active Permission Profile. Build mode combined with `full-access` means no per-action prompts for non-sensitive operations inside declared workspace boundaries.
+
+<Tip>
+  Switching from Plan to Build does not consume or require a plan. You can enter Build mode directly at session start, and you can switch back to Plan at any time to inspect the workspace without risk of mutation.
+</Tip>

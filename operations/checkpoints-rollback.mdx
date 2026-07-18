@@ -1,0 +1,271 @@
+---
+title: "Checkpoints and Rollback: File Change Protection"
+sidebarTitle: "Checkpoints"
+description: "thcode records encrypted pre/post-image checkpoints for every file mutation. Three-way conflict analysis determines what can be safely reversed before applying a rollback."
+---
+
+Every time thcode performs a built-in file mutation — creating, editing, or deleting a file — it captures a checkpoint: an encrypted snapshot of the file's state both before and after the change. These checkpoints are stored in a crash-consistent SQLite-backed key-value store and form the foundation of thcode's rollback capability. When you want to undo a set of changes, thcode performs a three-way analysis comparing the recorded pre-image, the recorded post-image, and the file's current on-disk state before applying any inverse operation.
+
+## How Checkpoints Are Structured
+
+A checkpoint consists of two layers: the `CheckpointRepository` holds checkpoint metadata, and the `ArtifactStore` holds the encrypted bytes of the original file content.
+
+### CheckpointRepository
+
+`CheckpointRepository` stores checkpoint records in an injectable `KeyValueStore` (SQLite in production, in-memory in tests). Each record tracks the checkpoint's lifecycle from staging through commit.
+
+```typescript
+interface CheckpointRecord {
+  checkpointId: CheckpointId;       // Opaque branded UUID
+  mutation: MutationMetadata;       // operationId, aggregateVersion, commitState
+  artifactIds: readonly ArtifactId[]; // References to ArtifactStore entries
+  parentCheckpointIds: readonly CheckpointId[];
+  coverageState: CoverageState;     // 'fully-protected' | 'partially-protected' | 'unprotected'
+  retentionState: RetentionState;   // 'retained' | 'eligible-for-eviction' | 'evicted'
+  integrityState: IntegrityState;   // 'verified' | 'corrupt' | 'recovery-locked'
+  stageState: StageState;           // 'staging' | 'staged' | 'committed' | 'unreachable'
+  createdAt: string;
+  promptRound?: number;
+}
+```
+
+Checkpointing is staged before it is committed. A crash between `stage()` and `commit()` leaves the record in `staging` state. On next startup, `reconcile()` detects all such incomplete stages, marks their records as `unreachable`, and sets `integrityState` to `'recovery-locked'` — they are never surfaced as complete checkpoints.
+
+### ArtifactStore
+
+`ArtifactStore` holds the actual file bytes for each checkpoint target. Plaintext bytes **never** enter the backing store, logs, or any UI output. Every artifact is encrypted with AES-256-GCM before being written, using the same versioned envelope as session content.
+
+```typescript
+// Encryption uses a collision-resistant nonce and authenticated context
+// that binds the artifact's identity, content class, schema version,
+// and key version to the ciphertext.
+const aadContext =
+  `artifact-store:thcode-artifact-store:${artifactId}:${contentClass}:v${schemaVersion}:k${keyVersion}`;
+```
+
+Content metadata is stored alongside the ciphertext in plaintext (it contains no sensitive material):
+
+```typescript
+interface ContentMetadata {
+  digest: string;      // Hex-encoded SHA-256 of the original plaintext bytes
+  size: number;        // Size of the plaintext in bytes
+  contentClass: string; // e.g. 'file-content', 'binary-blob'
+  schemaVersion: number;
+  keyVersion: number;
+}
+```
+
+### Branded ID Types
+
+Both stores use opaque branded types to prevent accidental ID confusion at the type level:
+
+```typescript
+type CheckpointId = string & { readonly __brand: 'CheckpointId' };
+type ArtifactId   = string & { readonly __brand: 'ArtifactId' };
+```
+
+## Integrity Verification
+
+`integrity.ts` provides the read-with-integrity path used by every consumer of checkpoint data.
+
+### Checkpoint Record Integrity
+
+Before a `CheckpointRecord` is returned to application code, `verifyCheckpointIntegrity` checks:
+
+- The stored `checkpointId` matches the requested ID (detects record tampering)
+- `mutation.operationId` is present and non-empty
+- `artifactIds` field exists (empty is valid for metadata-only checkpoints)
+- `stageState` is not `'unreachable'`
+- `integrityState` is not `'corrupt'` or `'recovery-locked'`
+
+Any mismatch returns an `IntegrityFailure` — no content reaches application code on failure.
+
+### Artifact Content Integrity
+
+After decryption, `verifyArtifactIntegrity` checks:
+
+- SHA-256 digest of the decrypted bytes matches the stored `metadata.digest`
+- Byte length matches `metadata.size`
+
+```typescript
+// Digest mismatch → corrupt failure (retryable: false)
+const actualDigest = computeDigest(plaintext); // SHA-256 hex
+if (actualDigest !== metadata.digest) {
+  return { ok: false, failure: corruptFailure('artifact', 'digest mismatch') };
+}
+```
+
+### Failure Categories
+
+<CardGroup cols={2}>
+  <Card title="corrupt" icon="triangle-exclamation">
+    Record or content has been altered. Non-retryable. Recovery actions: inspect the store, restore from backup.
+  </Card>
+  <Card title="recovery-locked" icon="lock">
+    Checkpoint is unreachable or in an incomplete stage. Non-retryable. Recovery actions: inspect the store, run recovery procedure.
+  </Card>
+</CardGroup>
+
+## Retention Policy
+
+Retention is measured in **Prompt Rounds**, not wall-clock time, making it predictable regardless of session activity.
+
+```typescript
+const DEFAULT_RETENTION_PROMPT_ROUNDS = 5;  // default window
+const MIN_RETENTION_PROMPT_ROUNDS = 1;
+const MAX_RETENTION_PROMPT_ROUNDS = 100;
+
+// Expiry = creationPromptRound + config.subsequentPromptRounds
+interface RetentionState {
+  creationPromptRound: number;
+  expiryPromptRound: number;   // exclusive
+  retained: boolean;
+}
+```
+
+### Capacity Caps
+
+`evaluateCapacity()` in `retention/capacity.ts` enforces two hard limits before any checkpoint is created:
+
+| Cap | Value |
+|-----|-------|
+| Per-checkpoint | 100 MB |
+| Total store | 500 MB |
+
+When a proposed checkpoint would breach either cap, the mutation preflight reports `over-cap` and **requires explicit confirmation to proceed without rollback protection**. The exact usage and unprotected scope are disclosed. Full Access cannot suppress this disclosure.
+
+<Warning>
+  Over-cap operations proceed without rollback protection. Shell, process, remote, permission, symlink-side, and external effects are never claimed reversible regardless of capacity status.
+</Warning>
+
+## Three-Way Conflict Analysis
+
+Before any rollback is applied, `analyzeRollbackSet()` performs a three-way comparison for each target file. The three states involved are:
+
+```typescript
+type ThreeWayState =
+  | { kind: 'present'; digest: string; version: string | null }
+  | { kind: 'absent' }
+  | { kind: 'unknown' };
+```
+
+Each target is analyzed independently via `analyzeRollbackTarget()`, which:
+
+1. Resolves the file's stable current identity (detects renames, symlink re-targets, and case/unicode changes)
+2. Checks accessibility and open file handles
+3. Builds `preImage`, `postImage`, and `currentState` as `ThreeWayState` values
+4. Determines the `AnalysisOutcome`
+
+### Analysis Outcomes
+
+<Accordion title="applied-eligible">
+  The current file digest matches the recorded post-image and the identity is unchanged. A concrete `InverseOperation` is produced, along with the expected current digest and version.
+</Accordion>
+
+<Accordion title="conflict">
+  The current state differs from the post-image, or the file is behind a symlink, or a concurrent change overlapped the checkpoint. Three safe resolution choices are offered: `skip-target`, `export-sanitized-patch`, or `user-authored-resolution`. Generic overwrite, blind retry, and continue are never available.
+
+  Conflict reason codes include: `behind-symlink`, `target-deleted`, `target-recreated`, `content-conflict`, `binary-corrupt`, `no-pre-image-digest`.
+</Accordion>
+
+<Accordion title="skipped">
+  The target was explicitly excluded or is not covered by this checkpoint.
+</Accordion>
+
+<Accordion title="inaccessible">
+  The current state cannot be read — typically a permissions issue or a file that exists but is not readable.
+</Accordion>
+
+<Accordion title="mismatch">
+  The target's identity has changed since the checkpoint was created (renamed, recreated, case/unicode changed). Reason codes: `identity-changed`.
+</Accordion>
+
+<Accordion title="unknown-outcome">
+  The file has open handles or the concurrency state is uncertain. No overwrite or best-effort reversal is prepared.
+</Accordion>
+
+### Binary Originals
+
+Binary files are handled via the `ArtifactStore`. The analysis reads binary originals through the integrity-verified path and verifies their digest **without exposing raw bytes** in the UI, logs, or Evidence. If the artifact is missing or corrupt, the target is marked `inaccessible` or `conflict` respectively — it is never apply-eligible.
+
+## Applying a Rollback
+
+`applyRollback()` applies only the conflict-free targets from a prior analysis. The full ordered execution sequence per target is:
+
+<Steps>
+  <Step title="Resolve identity">
+    Re-resolve the file's canonical path. Detects renames or symlink changes that occurred between analysis and apply time.
+  </Step>
+  <Step title="Capture current digest and version">
+    Reads the current file state immediately before any mutation, before authorization is consumed.
+  </Step>
+  <Step title="Revalidate against analysis">
+    Compares the captured current state against the analysis expectation. A concurrent change since analysis causes the target to be re-classified — no stale inverse is applied.
+  </Step>
+  <Step title="Stage and commit checkpoint">
+    A new checkpoint is created for the rollback operation itself **before** any mutation (so the rollback can itself be rolled back).
+  </Step>
+  <Step title="Append EffectDispatchCommitted">
+    Written to the journal before the native mutation. The journal is the sole commit-visibility authority.
+  </Step>
+  <Step title="Apply inverse operation">
+    One of the three concrete inverse operation types is executed.
+  </Step>
+  <Step title="Append terminal event">
+    `OperationSucceeded` or `OperationFailed` is written to the journal after the mutation.
+  </Step>
+</Steps>
+
+### Inverse Operation Types
+
+```typescript
+type InverseOperation =
+  | { kind: 'restore-pre-image'; preImageDigest: string }
+  | { kind: 'delete-file' }
+  | { kind: 'restore-from-artifact'; artifactId: string };
+```
+
+| Inverse | When used |
+|---------|-----------|
+| `restore-pre-image` | Reverse an `edit_file` — writes the pre-image content back from the ArtifactStore, verifying its digest before writing |
+| `delete-file` | Reverse a `create_file` — removes the file (idempotent if already absent) |
+| `restore-from-artifact` | Reverse a `delete_file` on a binary file — reads and integrity-verifies the encrypted artifact before writing |
+
+### Aggregate Result Types
+
+```typescript
+type RollbackApplyResultType = 'full' | 'partial' | 'blocked';
+```
+
+- **`full`** — every selected target was applied
+- **`partial`** — some targets applied, others had conflicts or errors
+- **`blocked`** — no targets could be applied
+
+The `RollbackApplyResult` includes per-target outcomes, counts by category, residual conflicts with safe choices, excluded effects, and a reference to the new checkpoint created for the rollback operation.
+
+### Per-Target Apply Outcomes
+
+```typescript
+type ApplyTargetOutcome =
+  | { kind: 'applied'; inverseOperation: InverseOperation; ... }
+  | { kind: 'skipped';  reason: string }
+  | { kind: 'conflict'; reasonCode: string; safeChoices: SafeChoice[] }
+  | { kind: 'inaccessible'; causeCode: string }
+  | { kind: 'mismatch'; reasonCode: string }
+  | { kind: 'unknown-outcome'; reason: string };
+```
+
+## What Is Never Reversible
+
+<Warning>
+  Automatic rollback covers **only** checkpointed built-in `create_file`, `edit_file`, and `delete_file` operations. The following effect categories are permanently excluded and are never claimed reversible:
+
+  - **Shell** — any command executed via the shell
+  - **Remote** — API calls, HTTP requests, network transfers
+  - **Permission** — `chmod`, `chown`, ACL changes
+  - **Process** — spawning or killing processes
+  - **Symlink-side** — effects via symlink targets (not the symlink itself)
+  - **External** — any effect outside the workspace filesystem
+
+  These categories appear in the `excludedEffects` field of every `RollbackApplyResult` with status `never-protected`.
+</Warning>

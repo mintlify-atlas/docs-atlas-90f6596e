@@ -1,0 +1,114 @@
+---
+title: "AI for Thai Catalog: Registry-Driven Tool Discovery"
+sidebarTitle: "Overview"
+description: "thcode's AI for Thai catalog is a versioned registry of Thai specialist services. Catalogued services are discoverable but not yet callable — integration and verification are separate steps."
+---
+
+thcode integrates with [AI for Thai](https://aiforthai.in.th) through a versioned, registry-driven capability catalog. Rather than scraping the upstream website at startup, the CLI ships a checked-in **Catalog Manifest** — a reviewed offline snapshot that lists every catalogued service with its identity, modality, endpoint, privacy classification, and support level. This means catalog discovery is deterministic and works offline. What it does **not** mean is that a listed service is ready to call: catalog presence and API entitlement are entirely separate things.
+
+<Note>
+  The manifest carries a canonical disclaimer: **"Catalog presence is not API entitlement."** A service must progress through the full support-level ladder before thcode will invoke it.
+</Note>
+
+## Catalog Manifest
+
+The manifest shipped with this release has the following metadata:
+
+| Field              | Value                                              |
+| ------------------ | -------------------------------------------------- |
+| `manifestVersion`  | `1`                                                |
+| `observationDate`  | `2026-07-12`                                       |
+| `source`           | `https://aiforthai.in.th (reviewed snapshot; ADR 0011)` |
+
+The observation date tells you exactly which upstream snapshot the catalog was derived from. When AI for Thai adds or renames a service, the manifest must be explicitly updated — there is no background sync.
+
+## Support Levels
+
+Every entry in the catalog carries one of four support levels, defined in ADR 0011:
+
+<Steps>
+  <Step title="Catalogued">
+    The service is **visible and inspectable** in `/tools` — you can read its metadata, description, endpoint, and privacy classification. It is **not claimed callable**. The CLI will not invoke a catalogued-only service and will not describe it as available.
+  </Step>
+  <Step title="Integrated">
+    The service has an implemented endpoint mapping, a credential policy, and an adapter handler. Transport requests can be built and dispatched.
+  </Step>
+  <Step title="Verified">
+    The service passes a repeatable live contract test against the actual endpoint using a reviewed, built-in (non-user) fixture. The registry entry carries a passing `latestContractTestResult`.
+  </Step>
+  <Step title="Demo-Certified">
+    The service has been verified end-to-end through the Typhoon agent loop and is approved for the competition demonstration portfolio.
+  </Step>
+</Steps>
+
+<Warning>
+  All four services in the current Phase 1 catalog are at **`catalogued`** level. None are callable yet. Integration, verification, and demo-certification are subsequent phases — see the Phase 1 roadmap in ADR 0011.
+</Warning>
+
+## Current Catalog
+
+The Phase 1 manifest contains four services spanning all four category buckets defined in the upstream catalog:
+
+| Service ID                  | Upstream Name             | Category     | Modality | Endpoint                                        | Support Level |
+| --------------------------- | ------------------------- | ------------ | -------- | ----------------------------------------------- | ------------- |
+| `t-ocr`                     | T-OCR                     | vision       | image    | `https://api.aiforthai.in.th/ocr`               | `catalogued`  |
+| `speech-to-text`            | Speech-to-Text            | conversation | audio    | `https://api.aiforthai.in.th/partii-webapi`     | `catalogued`  |
+| `extract-address`           | Extract Address           | other        | text     | `https://api.aiforthai.in.th/textmedad`         | `catalogued`  |
+| `named-entity-recognition`  | Named Entity Recognition  | language     | text     | `https://api.aiforthai.in.th/thainer`           | `catalogued`  |
+
+These four also form the **Verification Quartet** — they are the required services that must pass live contract tests before the Phase 1 prototype is considered verified. Three of them (T-OCR, Speech-to-Text, Extract Address) additionally make up the **Demo Portfolio**.
+
+<CardGroup cols={2}>
+  <Card title="T-OCR" icon="image" href="/aiforthai/t-ocr">
+    Thai text detection and recognition from images. Category: vision, modality: image.
+  </Card>
+  <Card title="Speech-to-Text" icon="microphone" href="/aiforthai/speech-to-text">
+    Thai automatic speech recognition. Category: conversation, modality: audio.
+  </Card>
+  <Card title="Extract Address" icon="location-dot" href="/aiforthai/extract-address">
+    Parse Thai free-text addresses into structured components. Category: other, modality: text.
+  </Card>
+  <Card title="Named Entity Recognition" icon="tag" href="/aiforthai/named-entity-recognition">
+    Identify people, places, and organizations in Thai text. Category: language, modality: text.
+  </Card>
+</CardGroup>
+
+## Browsing the Catalog with `/tools`
+
+The `/tools` command is the primary interface for exploring and managing the catalog. It exposes the following operations:
+
+<Accordion title="Browse">
+  List all entries with their IDs, upstream names, categories, modalities, and support levels. The manifest version and observation date are shown so you always know which snapshot you are looking at.
+</Accordion>
+
+<Accordion title="Search">
+  Filter entries by any term — English or Thai. Each entry carries a `searchTerms` array that includes both English keywords and Thai-script equivalents (for example, `อ่านตัวอักษร` for T-OCR, `ถอดเสียง` for Speech-to-Text).
+</Accordion>
+
+<Accordion title="Inspect">
+  View the full metadata for a single entry: endpoint, modality, privacy classification, retention policy, confirmation policy, input limits, contract version, adapter version, and the latest contract-test result.
+</Accordion>
+
+<Accordion title="Enable / Disable">
+  Toggle whether a service is active within the current session. Disabling a service prevents it from being proposed by the tool router even when a task matches its search terms.
+</Accordion>
+
+<Accordion title="Diagnose / Retest">
+  Run a health check or re-execute the service's contract test. For catalogued services, diagnosis will report `Catalogued — Not available yet` because no adapter has been registered.
+</Accordion>
+
+## Tool Router and Schema Isolation
+
+When a task arrives, the tool router inspects the prompt and matches it against every entry's search terms. If a single service wins, the router produces a **`propose`** routing decision containing a `TaskRelevantSchema` for **only that one service** — the reasoning model never receives all four schemas at once. If two or more candidates tie, the router issues a **`clarify`** decision asking the user to resolve the ambiguity. If the matched service is catalogued-only, the router returns a **`refused`** decision with reason `Catalogued — Not available yet`.
+
+<Tip>
+  Schema isolation keeps context consumption low and tool-selection reliable. A single routing turn sends at most one service's input constraints and transport policy to the model.
+</Tip>
+
+## Privacy and Consent
+
+Each registry entry carries a `privacyClassification` with a category, a list of data classes, and a `requiresConsent` flag. Services that handle identity, biometric, medical, or other sensitive data require stricter consent flows and data-handling policies before they can be enabled. The `confirmationPolicy` on each entry specifies whether explicit per-invocation consent is required and the scope that consent covers.
+
+## Architecture Reference
+
+The registry-driven catalog is defined in ADR 0011: Registry-Driven AI for Thai Tool Catalog. The ADR specifies the support-level ladder, adapter families, manifest update process, Phase 1 Verification Quartet, Demo Portfolio, and the Phase 2 roadmap for broader catalog verification.
