@@ -1,7 +1,7 @@
 ---
-title: "Transfer Consent for AI for Thai Services"
+title: "Transfer Consent for AI for Thai Specialist Services"
 sidebarTitle: "Consent & Transfer"
-description: "Sending data to AI for Thai specialist services requires explicit per-operation transfer consent. thcode blocks service calls until consent, credential health, and authority are all satisfied."
+description: "Transfer consent gates every AI for Thai specialist call. thcode blocks transfers until manifest consent, credential health, and authority are satisfied."
 ---
 
 Every time thcode routes an artifact to an AI for Thai specialist service, local read permission is not enough. The payload is leaving the workspace and traveling to an external endpoint, so a separate, explicit transfer consent decision is required for each exact operation — independent of any Full Access flag, Work Mode profile, or prior session approval. This page explains how the consent pipeline is structured, what information it captures, how it validates the credential-to-host binding, and precisely what causes a service call to be blocked.
@@ -72,7 +72,7 @@ The manifest's `classification` field is derived from the artifacts and the capa
 `resolveRetentionHandling` maps the registry entry's `retentionClassification.policy` string to one of four `RetentionHandling` values. When in doubt the function returns `unknown`, which causes the consent gate to fail closed:
 
 ```typescript
-// From specialists/consent/retention.ts
+// From permissions/transferConsent.ts
 export type RetentionHandling =
   | 'upstream-no-retention-verified'   // policy contains "no-retention", "none", "zero-retention", or "retention:none"
   | 'deletion-confirmed'               // policy contains "deletion-confirmed" AND providerDeletionSupported === true
@@ -270,14 +270,13 @@ A credential-boundary violation is denied **without contacting the destination**
 
 ### Credential Request Validation
 
-`validateCredentialRequest` enforces three additional transport-time rules:
+`validateCredentialRequest` enforces three transport-time rules:
 
 | Violation | `cause` | Explanation |
 |---|---|---|
 | Cross-origin redirect accepted | `cross-origin-redirect` | Credential is bound to the verified host; redirects are refused |
 | TLS verification bypassed | `tls-bypass` | Downgrade/bypass of TLS verification is refused |
 | Requested host ≠ verified host | `host-mismatch` | The outbound request target must exactly match the registered host |
-| Credential embedded in URL | `credential-in-url` | Credentials must only appear in transport headers |
 
 ### Staleness After Credential Rotation
 

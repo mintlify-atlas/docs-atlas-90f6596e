@@ -1,7 +1,7 @@
 ---
-title: "Plan and Build: thcode's Two Work Modes"
+title: "Plan and Build: Understanding thcode's Two Work Modes"
 sidebarTitle: "Work Modes"
-description: "thcode's Plan and Build modes are structurally orthogonal. Plan mode enforces read-only at the architecture level — no profile or override can authorize mutations."
+description: "thcode's Plan and Build modes are orthogonal session state. Plan mode enforces read-only at the architecture level — no profile can authorize mutations."
 ---
 
 thcode operates in one of two Work Modes at all times: **Plan** and **Build**. These modes are not pipeline stages — they are independently selectable dimensions of session state. You can enter either mode directly, switch freely between them mid-session, and the currently active mode is always visible in the terminal UI. Work Mode is orthogonal to [Permission Profile](/concepts/permission-profiles): neither implies the other, and both must be treated as separate UI state.
@@ -82,7 +82,7 @@ Plan mode allows all non-mutating operations. The model can fully analyze a code
 Any action whose `mutating` flag is `true` in the Permission Matrix is blocked unconditionally while in Plan mode, regardless of Permission Profile.
 
 <Warning>
-  Plan mode cannot write files, delete files, run commands, or perform transfers. These are mutating action classes and are structurally denied — not just policy-denied. No profile or developer override can change this while Plan mode is active.
+  Plan mode cannot write files, delete files, or run commands. These are mutating action classes and are structurally denied — not just policy-denied. No profile or developer override can change this while Plan mode is active. Note that `transfer` is non-mutating and is not blocked by Plan mode, but it is sensitive and will always require approval.
 </Warning>
 
 ## Action class reference
@@ -97,10 +97,10 @@ The Permission Matrix defines a fixed registry of action classes with static att
 | `write_file` | **Yes**  | No        | medium | `filesystem-write`              | ❌ No             |
 | `delete`     | **Yes**  | No        | high   | `filesystem-delete`             | ❌ No             |
 | `run_command`| **Yes**  | No        | high   | `command-exec`                  | ❌ No             |
-| `transfer`   | No       | **Yes**   | high   | `network-transfer`              | ❌ No (sensitive) |
+| `transfer`   | No       | **Yes**   | high   | `network-transfer`              | ⚠️ Ask (sensitive) |
 
 <Note>
-  `transfer` is marked non-mutating but sensitive, and carries a high risk rating. It is blocked in Plan mode not because it is mutating, but because sensitive actions always require approval unless `full-access` holds the explicit `sensitiveOverride` flag — see [Permission Profiles](/concepts/permission-profiles).
+  `transfer` is marked non-mutating but sensitive, and carries a high risk rating. It is not structurally blocked in Plan mode (it is not mutating), but sensitive actions always require approval — `evaluatePermission()` returns `ask` for any sensitive action unless `full-access` holds the explicit `sensitiveOverride` flag. See [Permission Profiles](/concepts/permission-profiles).
 </Note>
 
 ## Build mode

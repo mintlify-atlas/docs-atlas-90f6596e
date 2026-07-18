@@ -1,7 +1,7 @@
 ---
-title: "Workspace Containment and Hard Boundaries"
+title: "Workspace Containment, Identity, and Hard Boundaries"
 sidebarTitle: "Workspace Containment"
-description: "thcode enforces workspace containment on every file operation. Hard boundaries are non-overridable path restrictions. Containment failures block all local effects."
+description: "thcode checks every file path against the workspace root. Hard boundaries block effects regardless of profile. Blocked bindings deny tool execution."
 ---
 
 Every file operation thcode proposes is validated against a declared workspace root before any local effect can be authorized. This is not a best-effort check — containment is enforced on every path, on every turn, regardless of Work Mode or Permission Profile. A containment failure produces a `blocked` outcome that prevents any local effects from being authorized for that operation.

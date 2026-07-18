@@ -1,7 +1,7 @@
 ---
-title: "The thcode Agent Loop Architecture"
+title: "How thcode's Agent Loop Dispatches and Authorizes Tool Calls"
 sidebarTitle: "Agent Loop"
-description: "thcode's agent loop runs locally and calls Typhoon for reasoning. Understand how turns are dispatched, tool proposals are authorized, and results are streamed back."
+description: "thcode's local loop calls Typhoon for reasoning and enforces all permissions. Covers runTurn, TurnEvent, ApprovalCallback, and the 8-iteration stop."
 ---
 
 thcode separates intelligence from authority. The reasoning model (Typhoon) runs remotely and proposes actions — but every proposed action is an untrusted suggestion until the local agent loop validates, authorizes, and executes it on your machine. The local loop owns the conversation history, context selection, tool definitions, permission enforcement, and stop conditions. Typhoon is never given direct access to your filesystem, shell, or network.

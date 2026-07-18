@@ -1,7 +1,7 @@
 ---
-title: "Evidence Caching for Specialist Service Results"
+title: "Evidence Caching for AI for Thai Specialist Service Results"
 sidebarTitle: "Evidence Caching"
-description: "thcode caches immutable sealed evidence from AI for Thai service calls. Cached results preserve original consent provenance and avoid redundant service invocations."
+description: "thcode seals AI for Thai specialist results into immutable evidence records, preserving original consent provenance and avoiding redundant service calls."
 ---
 
 When an AI for Thai specialist service returns a result, thcode seals that result into an immutable `SpecialistEvidence` envelope and stores it in an `EvidenceRepository`. The next time the same operation is requested with the same inputs, the cached evidence is returned directly — no outbound transfer occurs, no re-consent is required, and the original consent provenance is preserved intact inside the evidence record. This page explains each layer of the caching pipeline: how evidence is sealed, how cache identity is computed, how hits are resolved, and how entries are invalidated or expired.
@@ -210,7 +210,7 @@ export interface CacheIndexEntry {
 
 The raw credential key never enters this structure. `credentialRevision` is the opaque revision string — it identifies the credential version without exposing its value.
 
-The `CacheIndex` exposes four operations:
+The `CacheIndex` exposes six operations:
 
 | Method | Description |
 |---|---|
@@ -219,6 +219,7 @@ The `CacheIndex` exposes four operations:
 | `markExpired(now)` | Sweep entries whose `expiresAt < now`, marking them `'expired'`. Does not delete. |
 | `invalidate(scope)` | Mark matching entries `'invalidated'` by scope. Returns affected digests. |
 | `invalidateDigest(digest)` | Mark one specific entry invalidated. Used for corrupt-evidence recovery. |
+| `list()` | Return a read-only snapshot of all entries regardless of state. |
 
 ## Cache Lookup Resolution
 

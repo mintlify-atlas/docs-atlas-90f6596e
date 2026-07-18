@@ -1,7 +1,7 @@
 ---
-title: "Session Storage: Encrypted SQLite and Journals"
+title: "Session Storage: Encrypted SQLite and Event Journals"
 sidebarTitle: "Session Storage"
-description: "thcode persists sessions in encrypted SQLite with a durable event journal. Sessions are globally accessible and restore in Manual mode with a fresh Runtime Activation."
+description: "thcode persists sessions in AES-256-GCM encrypted SQLite alongside a durable journal. History survives crashes; every open resets authority to Manual mode."
 ---
 
 thcode stores every conversation in a single SQLite database that lives in the native user-state directory for the current OS user. Session metadata, transcript entries, token ledger records, and context extensions are all encrypted before they reach the database. A separate durable event journal — co-located in the same SQLite file — provides crash-consistent commit visibility for every operation that modifies session state. Together, these two layers mean your conversation history survives process crashes, model switches, and workspace moves while remaining unreadable without the per-install encryption key.

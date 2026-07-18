@@ -1,5 +1,5 @@
 ---
-title: "Get Started with thcode in Minutes"
+title: "thcode Quickstart — Run Your First Thai Coding Task"
 sidebarTitle: "Quickstart"
 description: "Build thcode, configure your Typhoon key, and complete your first Thai coding task. From prerequisites to first agent response in five steps."
 ---
@@ -64,12 +64,11 @@ This guide takes you from a fresh clone to your first Thai coding request. By th
 
       | # | Probe | Hard blocker? |
       |---|---|---|
-      | 1 | **Platform** — must be `win32` for the current prototype | Yes |
-      | 2 | **Shell** — `pwsh.exe` must be present and supported | Yes |
-      | 3 | **Node version** — must be `>=22` | Yes |
-      | 4 | **Output mode** — must be an interactive TTY (not redirected/headless) | Yes |
-      | 5 | **Local store posture** — SQLite state directory availability | Best-effort |
-      | 6 | **Credential store posture** — OS credential store reachability | Best-effort |
+      | 1 | **Platform + shell** — `win32`/`pwsh.exe` or `darwin`/`zsh`; Git Bash, WSL, and `cmd.exe` are rejected | Yes |
+      | 2 | **Node version** — must be `>=22` | Yes |
+      | 3 | **Output mode** — must be an interactive TTY (not redirected/headless) | Yes |
+      | 4 | **Local store posture** — SQLite state directory availability | Best-effort |
+      | 5 | **Credential store posture** — OS credential store reachability | Best-effort |
 
       If all probes pass and the output mode is `interactive`, the gate emits a one-line safe summary and falls through to `main()`:
 

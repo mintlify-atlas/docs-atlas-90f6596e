@@ -1,7 +1,7 @@
 ---
-title: "Inspection Commands: Status, Permissions, Tools"
+title: "Inspection Commands: Status, Permissions, Activity, Context"
 sidebarTitle: "Inspection"
-description: "thcode's inspection commands expose session state, permission matrix, provider health, tool catalog, context utilization, and activity history without mutating anything."
+description: "Read-only thcode commands for session state, permissions, provider health, tool catalog, activity history, and context utilization."
 ---
 
 The inspection commands give you a precise, read-only view of every meaningful dimension of a running thcode session. None of them mutate state, execute shell commands, or consume authority. Output is identical across interactive, redirected, linearized, and headless JSON surfaces — the same fields, the same canonical tokens, the same order.
@@ -230,7 +230,7 @@ The utilization band thresholds are:
 
 </Accordion>
 
-Each `UsageObservation` has a `requestDigest` that can be used to cross-reference with the durable journal. When observations come from multiple sources, `measurement` is `'mixed'`.
+Each observation entry carries `operationId`, `modelId`, `source`, and `observedAt`. When observations come from multiple sources, `measurement` is `'mixed'`.
 
 ---
 

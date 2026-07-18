@@ -1,7 +1,7 @@
 ---
-title: "Security and Redaction: Protecting Credentials"
+title: "Security and Redaction: Protecting Sensitive Credentials"
 sidebarTitle: "Security"
-description: "thcode sanitizes all tool output before it reaches the reasoning model. Credential patterns are redacted at a hard enforcement boundary that the model cannot override."
+description: "thcode redacts secrets at every persistence and model-context boundary via a versioned Sanitizer that no Work Mode or permission profile can bypass."
 ---
 
 thcode applies multiple layers of credential protection to ensure that secrets never appear in model prompts, transcripts, logs, previews, or Evidence records. The innermost layer is a versioned `Sanitizer` that operates at every persistence and presentation boundary. On top of that, a dedicated `redactSecrets()` function scrubs recognized credential shapes from all tool output before it enters a reasoning turn. These are structural enforcement boundaries built into the execution pipeline — they are not configurable by the model and cannot be bypassed by permission profile choices.
@@ -190,6 +190,7 @@ A prepared payload manifest captures every attribute of a pending transfer witho
 
 ```typescript
 interface PreparedPayloadManifest {
+  manifestVersion: number;            // Schema version of the manifest structure
   sources: SelectedSource[];          // Identity and hash, never raw bytes
   classification: PayloadClassification; // 'public' | 'internal' | 'sensitive' | 'unresolved'
   purpose: string;

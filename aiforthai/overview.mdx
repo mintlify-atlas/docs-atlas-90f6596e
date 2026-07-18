@@ -1,7 +1,7 @@
 ---
 title: "AI for Thai Catalog: Registry-Driven Tool Discovery"
 sidebarTitle: "Overview"
-description: "thcode's AI for Thai catalog is a versioned registry of Thai specialist services. Catalogued services are discoverable but not yet callable — integration and verification are separate steps."
+description: "thcode's offline registry of AI for Thai specialist services. Four Phase-1 entries are catalogued: discoverable and inspectable, but not yet callable."
 ---
 
 thcode integrates with [AI for Thai](https://aiforthai.in.th) through a versioned, registry-driven capability catalog. Rather than scraping the upstream website at startup, the CLI ships a checked-in **Catalog Manifest** — a reviewed offline snapshot that lists every catalogued service with its identity, modality, endpoint, privacy classification, and support level. This means catalog discovery is deterministic and works offline. What it does **not** mean is that a listed service is ready to call: catalog presence and API entitlement are entirely separate things.

@@ -1,7 +1,7 @@
 ---
-title: "thcode Command Grammar Reference"
+title: "thcode Slash Command Grammar and Exit Code Reference"
 sidebarTitle: "Overview"
-description: "The complete frozen command grammar for thcode's interactive terminal. All 14 slash commands, their aliases, approval requirements, and shell-expansion blocking rules."
+description: "All 14 frozen slash commands, their aliases, approval requirements, and shell-expansion blocking rules for the thcode terminal agent."
 ---
 
 thcode dispatches every user action through a single frozen command grammar. There are exactly 14 declared slash commands; no new commands can appear at runtime through aliases, completions, or indirect shell behavior. This design means every action is auditable, every completion is deterministic, and no shell metacharacter can ever reach an underlying execution surface.
@@ -29,6 +29,7 @@ The `COMMAND_GRAMMAR` constant is a sealed, immutable array. Adding a command re
 | `<` | Input redirect |
 | `>` | Output redirect |
 | `&` | Background / combine |
+| `\` + newline | Shell line-continuation escape |
 | `$(` | POSIX command substitution |
 | `sh -c` | Inline shell invocation |
 
@@ -164,6 +165,9 @@ The exit codes above apply only to terminal rows in the `operation-status` dimen
   </Card>
   <Card title="measurement-quality" icon="chart-bar">
     Measurement qualifiers: `estimated`, `provider-reported`, `locally-measured`, `fallback`, `unknown`, `percentage unavailable`
+  </Card>
+  <Card title="provider-deletion-lifecycle" icon="trash">
+    Nonterminal, provider-contract-conditional facts: `upstream-no-retention-verified`, `deletion-not-required`, `deletion-confirmed`
   </Card>
 </CardGroup>
 

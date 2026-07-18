@@ -1,5 +1,5 @@
 ---
-title: "AI for Thai Credentials and Service Access"
+title: "AI for Thai Credentials: Service Access and Key Lifecycle"
 sidebarTitle: "AI for Thai"
 description: "thcode stores your AI for Thai developer key locally, passing it only to verified aiforthai.in.th endpoints. A key alone does not enable services."
 ---
@@ -65,10 +65,10 @@ The AI for Thai credential is onboarded **just-in-time**: thcode pauses at the f
     Only a secret-free `AiForThaiCredentialReference` is persisted in product storage:
     ```typescript
     interface AiForThaiCredentialReference {
-      referenceId: string;         // e.g. "aiforthai-2026-07-12T..."
-      credentialRevision: string;  // changes on rotation
-      fingerprint: string;         // hash of identity + host + revision
-      storedAt: string;            // UTC ISO-8601
+      readonly referenceId: string;         // e.g. "aiforthai-2026-07-12T..."
+      readonly credentialRevision: string;  // changes on rotation
+      readonly fingerprint: string;         // hash of identity + host + revision
+      readonly storedAt: string;            // UTC ISO-8601
     }
     ```
     The raw key value never appears in this record or anywhere in product persistence.

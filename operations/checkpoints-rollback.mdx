@@ -1,7 +1,7 @@
 ---
-title: "Checkpoints and Rollback: File Change Protection"
+title: "Checkpoints and Rollback: Protecting File Mutations"
 sidebarTitle: "Checkpoints"
-description: "thcode records encrypted pre/post-image checkpoints for every file mutation. Three-way conflict analysis determines what can be safely reversed before applying a rollback."
+description: "thcode captures encrypted pre/post-image checkpoints for every file mutation. Three-way analysis determines what is safely reversible before rollback runs."
 ---
 
 Every time thcode performs a built-in file mutation — creating, editing, or deleting a file — it captures a checkpoint: an encrypted snapshot of the file's state both before and after the change. These checkpoints are stored in a crash-consistent SQLite-backed key-value store and form the foundation of thcode's rollback capability. When you want to undo a set of changes, thcode performs a three-way analysis comparing the recorded pre-image, the recorded post-image, and the file's current on-disk state before applying any inverse operation.
@@ -117,9 +117,11 @@ const MAX_RETENTION_PROMPT_ROUNDS = 100;
 
 // Expiry = creationPromptRound + config.subsequentPromptRounds
 interface RetentionState {
+  checkpointId: CheckpointId;
   creationPromptRound: number;
   expiryPromptRound: number;   // exclusive
   retained: boolean;
+  config: RetentionConfig;     // the configured window that produced this state
 }
 ```
 

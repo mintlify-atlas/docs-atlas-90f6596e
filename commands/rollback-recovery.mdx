@@ -1,7 +1,7 @@
 ---
-title: "Rollback and Recovery: Checkpoint Commands"
+title: "Rollback and Recovery: Checkpoints and Reconciliation"
 sidebarTitle: "Rollback & Recovery"
-description: "Use /rollback to inspect checkpoints and /recover to reconcile interrupted operations. Rollback covers only built-in file effects — shell and remote effects are never reversible."
+description: "Discover and preview rollback checkpoints with /rollback; reconcile interrupted operations with /recover. Shell and remote effects are never reversible."
 ---
 
 thcode's checkpoint system creates durable snapshots before built-in file mutations. The `/rollback` command lets you discover and preview those checkpoints; `/recover` helps you reconcile operations that were interrupted before they reached a terminal outcome. Both commands are read-safe: inspecting a checkpoint does not stage or apply anything.
